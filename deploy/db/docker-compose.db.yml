@@ -1,0 +1,100 @@
+# HiClaw AgentTeams - 云端数据库栈 (部署在阿里云 ECS, 8G 规格)
+#
+# 用法 (在 ECS 上):
+#   mkdir -p /opt/agentteams-db
+#   # 把本文件和 .env (由 .env.db 复制) 放到 /opt/agentteams-db/
+#   docker compose --env-file .env up -d
+#
+# 前置条件:
+#   - vm.max_map_count >= 262144  (Neo4j 必须, 见 scripts/deploy-db-ecs.sh 自动设置)
+#   - 端口仅绑定 127.0.0.1, 通过 SSH 隧道从本地访问, 绝不暴露公网
+#
+# 内存预算 (8G 机器):
+#   Ubuntu ~1G | postgres 0.5G | redis 0.1G | meili 0.3G | neo4j 3G(堆1.5+pagecache1.5) ≈ 6G, 余量 1G+
+
+services:
+  postgres:
+    # 使用业界标准的 pgvector 预构建镜像 (ankane/pgvector, 基于官方 postgres)
+    # 注意: 原 pgvector/pgvector:0.5.1-pg15 标签在 Docker Hub 不存在
+    image: ankane/pgvector:latest
+    container_name: at-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agentteams}
+      POSTGRES_USER: ${POSTGRES_USER:-agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent} -d ${POSTGRES_DB:-agentteams}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: at-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 160m
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.5
+    container_name: at-meili
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: ${MEILI_ENV:-development}
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-changeme-master-key}
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "127.0.0.1:7700:7700"
+    volumes:
+      - meilidata:/meili_data
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  neo4j:
+    image: neo4j:5.18-community
+    container_name: at-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1536m
+      NEO4J_dbms_memory_pagecache_size: 1536m
+      NEO4J_dbms_security_auth__minimum__password__length: 4
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - neo4jdata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
+  meilidata:
+  neo4jdata:

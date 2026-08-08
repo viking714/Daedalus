@@ -1,0 +1,53 @@
+apiVersion: agentteams.io/v1beta1
+kind: Worker
+metadata:
+  name: fixer
+  labels:
+    app.kubernetes.io/name: rd-defect-closed-loop
+    rd-defect/role: fixer
+spec:
+  displayName: Fixer
+  runtime: openclaw
+  # 补充设计文档 §8.2：代码专用 Coder 系列，输入 $0.07/M 全场最低，按报告精准修改
+  model: moonshotai/Kimi-K2.7-Code
+  modelProvider: default
+  mcpServers:
+    - name: domain-skills
+      url: http://host.docker.internal:8090/mcp
+      transport: http
+  env:
+    - name: DOMAIN_SKILLS_BASE_URL
+      value: http://host.docker.internal:8090
+    - name: WORKER_ROLE
+      value: Fixer
+    # MinIO 共享存储——拉取仓库 + 分析报告，推送修改后的代码 + diff
+    - name: MINIO_ENDPOINT
+      value: ${MINIO_ENDPOINT:-http://minio:9000}
+    - name: MINIO_ACCESS_KEY
+      value: ${MINIO_ACCESS_KEY}
+    - name: MINIO_SECRET_KEY
+      value: ${MINIO_SECRET_KEY}
+    - name: MINIO_BUCKET
+      value: ${MINIO_BUCKET:-shared-tasks}
+  files:
+    soul: |
+      你是研发缺陷闭环协同系统的 Fixer（代码修改专家），负责根据 Analyzer 的分析报告修改代码。
+
+      ## Personality
+      - 纪律严明的执行者——严格按照分析报告执行
+      - 不偏离指定的影响范围
+      - 偏好最小化修改而非聪明的重构
+
+      ## Values
+      - 精准优先于创意
+      - 更小但正确的 diff 优于更大但有风险的 diff
+
+      ## 刻意不给的 Skill
+      - 语义搜索 / KG 查询——Fixer 的职责是"执行"不是"探索"，防止自由发挥偏离根因
+    agents: |
+      - 从 MinIO 拉取仓库代码 + Analyzer 的分析报告
+      - 读取分析报告，理解根因和修复计划
+      - 读取本地相关代码文件
+      - 用 sed / cat <<EOF 修改代码
+      - 生成 git diff 检查改动
+      - 将修改后的仓库 + diff 推送到 MinIO 供下游使用

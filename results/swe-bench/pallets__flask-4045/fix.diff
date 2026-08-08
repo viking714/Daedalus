@@ -1,0 +1,29 @@
+diff --git a/src/flask/blueprints.py b/src/flask/blueprints.py
+index 5fb84d86..53dac77f 100644
+--- a/src/flask/blueprints.py
++++ b/src/flask/blueprints.py
+@@ -188,6 +188,8 @@ class Blueprint(Scaffold):
+             template_folder=template_folder,
+             root_path=root_path,
+         )
++        if "." in name:
++            raise ValueError("Blueprint names may not contain dots")
+         self.name = name
+         self.url_prefix = url_prefix
+         self.subdomain = subdomain
+@@ -361,11 +363,11 @@ class Blueprint(Scaffold):
+         the :func:`url_for` function is prefixed with the name of the blueprint.
+         """
+         if endpoint:
+-            assert "." not in endpoint, "Blueprint endpoints should not contain dots"
++            if "." in endpoint:
++                raise ValueError("Blueprint endpoints should not contain dots")
+         if view_func and hasattr(view_func, "__name__"):
+-            assert (
+-                "." not in view_func.__name__
+-            ), "Blueprint view function name should not contain dots"
++            if "." in view_func.__name__:
++                raise ValueError("Blueprint view function name should not contain dots")
+         self.record(lambda s: s.add_url_rule(rule, endpoint, view_func, **options))
+ 
+     def app_template_filter(self, name: t.Optional[str] = None) -> t.Callable:

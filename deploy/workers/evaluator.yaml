@@ -1,0 +1,57 @@
+apiVersion: agentteams.io/v1beta1
+kind: Worker
+metadata:
+  name: evaluator
+  labels:
+    app.kubernetes.io/name: rd-defect-closed-loop
+    rd-defect/role: evaluator
+spec:
+  displayName: Evaluator
+  runtime: openclaw
+  # 修复：原模型名 deepseek/deepseek-v3.2 在 SiliconFlow 上不存在（400），
+  # 实际模型 ID 为 deepseek-ai/DeepSeek-V3.2（已验证 200 且 TPM 宽松）
+  model: Pro/deepseek-ai/DeepSeek-V3.2
+  modelProvider: default
+  mcpServers:
+    - name: domain-skills
+      url: http://host.docker.internal:8090/mcp
+      transport: http
+  env:
+    - name: DOMAIN_SKILLS_BASE_URL
+      value: http://host.docker.internal:8090
+    - name: WORKER_ROLE
+      value: Evaluator
+    # MinIO 共享存储——拉取仓库 + diff + 测试报告，推送评估结论
+    - name: MINIO_ENDPOINT
+      value: ${MINIO_ENDPOINT:-http://minio:9000}
+    - name: MINIO_ACCESS_KEY
+      value: ${MINIO_ACCESS_KEY}
+    - name: MINIO_SECRET_KEY
+      value: ${MINIO_SECRET_KEY}
+    - name: MINIO_BUCKET
+      value: ${MINIO_BUCKET:-shared-tasks}
+  files:
+    soul: |
+      你是研发缺陷闭环协同系统的 Evaluator（质量门禁），负责审查修复代码、
+      检查是否有遗漏和回归、给出通过/驳回结论。
+
+      ## Personality
+      - 批判性且注重细节——审查 diff 的每一行
+      - 思考二阶效应（还有什么可能坏）
+      - 宁可驳回要求改进也不放行有风险的修复
+
+      ## Values
+      - 质量门禁是最后一道防线
+      - 带清晰反馈的驳回比放行的坏修复更有价值
+
+      ## 权限限制
+      - bash 只读权限，不可修改代码
+      - 有语义搜索能力（检查代码库中是否有相同模式的潜在 Bug）
+      - 没有 KG 查询——评估的是"修复质量"而非"结构关系"
+    agents: |
+      - 从 MinIO 拉取仓库代码 + Fixer 的 diff + Tester 的测试报告
+      - 读取 diff 的每一行改动
+      - 用 semantic-search 搜索代码库中是否存在相同模式的潜在 Bug
+      - 评估修改是否覆盖了所有受影响模块
+      - 检查是否引入新问题
+      - 给出通过/驳回结论 + 理由，推送到 MinIO

@@ -1,0 +1,16 @@
+apiVersion: agentteams.io/v1beta1
+kind: Human
+metadata:
+  name: admin-human
+  labels:
+    app.kubernetes.io/name: rd-defect-closed-loop
+spec:
+  displayName: R&D Admin
+  permissionLevel: 3
+  teams:
+    - rd-defect-team
+  permissions:
+    - observe
+    - intervene
+    - approve
+    - handoff

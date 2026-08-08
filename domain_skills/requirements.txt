@@ -1,0 +1,18 @@
+# 领域技能服务依赖
+# 运行前：pip install -r requirements.txt
+#
+# MCP Server（AgentTeams Worker 通过 mcporter 连接）
+mcp[cli]>=1.0,<2
+# 数据库访问层（官方客户端）
+psycopg2-binary>=2.9
+neo4j-driver>=5.0
+meilisearch>=0.30
+redis>=5.0
+# 代码解析（tree-sitter，设计指定 AST 框架；tree-sitter-languages 提供预编译多语言 grammar）
+tree-sitter>=0.21
+tree-sitter-languages>=1.10
+# 嵌入（默认本地 fastembed，轻量、无需联网；可选 openai 后端）
+fastembed>=0.3
+openai>=1.0
+# diff 解析（影响面/契约分析）
+unidiff>=0.7.5

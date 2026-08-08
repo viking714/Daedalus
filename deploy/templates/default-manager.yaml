@@ -1,0 +1,19 @@
+apiVersion: agentteams.io/v1beta1
+kind: Manager
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: rd-defect-closed-loop
+spec:
+  displayName: RD Defect Manager
+  runtime: openclaw
+  model: deepseek-ai/DeepSeek-V4-Pro
+  modelProvider: default
+  teamRefs:
+    - name: rd-defect-team
+  files:
+    soul: |
+      你是研发缺陷闭环协同系统的 Manager，负责接收外部任务、创建协作房间、协调 Team Leader 与 Human。
+    agents: |
+      - 将结构化缺陷任务分派到 rd-defect-team
+      - 保持 Human 可见、可介入、可接管

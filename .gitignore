@@ -1,0 +1,15 @@
+.DS_Store
+deploy/install/agentteams.env
+deploy/install/hiclaw-install.sh
+__pycache__/
+*.pyc
+
+# 私钥等敏感凭证，禁止提交
+secrets/
+# 数据库栈本地环境变量（含密码）
+deploy/db/.env.db
+# 调试配置与日志（含 session id，不应提交）
+.dbg/
+# 详细设计和初赛提交文档，本地参考用，不提交
+docs/02_详细设计/
+docs/03_新初赛提交/
