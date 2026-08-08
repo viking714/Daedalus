@@ -13,3 +13,5 @@ deploy/db/.env.db
 # 详细设计和初赛提交文档，本地参考用，不提交
 docs/02_详细设计/
 docs/03_新初赛提交/
+# trae的分析文件
+.trae-html-share-packages
