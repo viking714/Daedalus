@@ -1,0 +1,23 @@
+apiVersion: agentteams.io/v1beta1
+kind: Team
+metadata:
+  name: rd-defect-team
+  labels:
+    app.kubernetes.io/name: rd-defect-closed-loop
+spec:
+  displayName: 研发缺陷闭环协同团队
+  description: SWE-bench defect repair closed-loop team
+  peerMentions: true
+  leader:
+    name: coordinator
+  workerMembers:
+    - name: coordinator
+      role: team_leader
+    - name: analyzer
+      role: worker
+    - name: fixer
+      role: worker
+    - name: tester
+      role: worker
+    - name: evaluator
+      role: worker

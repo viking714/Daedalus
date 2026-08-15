@@ -8,15 +8,16 @@ metadata:
 spec:
   displayName: Fixer
   runtime: openclaw
+  package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
   # 补充设计文档 §8.2：代码专用 Coder 系列，输入 $0.07/M 全场最低，按报告精准修改
-  model: moonshotai/Kimi-K2.7-Code
+  model: deepseek-ai/DeepSeek-V4-Pro
   modelProvider: default
   mcpServers:
     - name: domain-skills
       url: http://host.docker.internal:8090/mcp
       transport: http
   env:
-    - name: DOMAIN_SKILLS_BASE_URL
+    - name: CODE_INTEL_MCP_URL
       value: http://host.docker.internal:8090
     - name: WORKER_ROLE
       value: Fixer

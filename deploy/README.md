@@ -83,9 +83,9 @@ bash install/install_agentteams.sh
 
 | 组件 | 仓库路径 |
 |------|----------|
-| 领域技能 MCP Server | `domain_skills/` |
+| MCP Server（代码智能） | `mcp_server/`（含原语、组合工具、数据层） |
 | Worker 角色定义 | `deploy/workers/` |
-| 团队/管理/人类模板 | `deploy/templates/` |
+| 团队/管理/人类模板 | `deploy/teams/` |
 
 ---
 

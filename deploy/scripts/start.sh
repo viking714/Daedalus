@@ -34,9 +34,9 @@ REPO_ROOT="${SCRIPT_DIR}/../.."
 DEPLOY_DIR="${REPO_ROOT}/deploy"
 AGENTTEAMS_ENV="${DEPLOY_DIR}/install/agentteams.env"
 LOCAL_MANAGER_ENV="${HOME}/hiclaw-manager.env"
-PROJECT_PYTHON="${DOMAIN_SKILLS_PYTHON:-/opt/anaconda3/envs/GoAI/bin/python}"
+PROJECT_PYTHON="${CODE_INTEL_PYTHON:-/opt/anaconda3/envs/GoAI/bin/python}"
 if [[ ! -x "${PROJECT_PYTHON}" ]]; then
-  PROJECT_PYTHON="${DOMAIN_SKILLS_PYTHON:-python3}"
+  PROJECT_PYTHON="${CODE_INTEL_PYTHON:-python3}"
 fi
 LEGACY_WORKERS=(planner reasoner retriever verifier editor impact-analyst)
 
@@ -579,7 +579,7 @@ else
   set -a; source "${DB_ENV}"; set +a
 
   cd "${REPO_ROOT}"
-  nohup "${PROJECT_PYTHON}" domain_skills/mcp_server.py > /tmp/agentteams-skills.log 2>&1 &
+  nohup "${PROJECT_PYTHON}" mcp_server/server.py > /tmp/agentteams-skills.log 2>&1 &
   SKILL_PID=$!
   echo "${SKILL_PID}" > /tmp/agentteams-skills.pid
   ok "领域技能 MCP Server 已启动 (PID ${SKILL_PID}, 端口 8090)"

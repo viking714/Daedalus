@@ -119,8 +119,8 @@ RESULTS_DIR = os.getenv("SWE_RESULTS_DIR", "results/swe-bench")
 
 # 超时
 INDEX_TIMEOUT_SEC = 600       # 索引超时
-TASK_TIMEOUT_SEC = 1800       # 单任务超时（30 分钟）
-POLL_INTERVAL_SEC = 15        # 轮询间隔
+TASK_TIMEOUT_SEC = 600        # 单任务超时（5 分钟，调试期，通过后恢复 600）
+POLL_INTERVAL_SEC = 10        # 轮询间隔
 
 # --------------------------------------------------------------------------- #
 # 数据结构
@@ -419,7 +419,7 @@ def index_repo(repo_path: str, commit: str, ns: str) -> bool:
         log.error("索引前检查失败: %s", backend_error)
         return False
     try:
-        from domain_skills.skills import skill_repo_indexer
+        from mcp_server.composed_tools import skill_repo_indexer
 
         body = skill_repo_indexer({"repo_path": repo_path, "commit": commit})
         status = body.get("status", "unknown")
@@ -553,7 +553,7 @@ def reset_db(repo_name: str = "flask") -> bool:
 
     # 1. PostgreSQL — 删除所有代码块
     try:
-        from domain_skills.db.pgvector import PgVectorStore
+        from mcp_server.db.pgvector import PgVectorStore
         store = PgVectorStore()
         deleted = store.delete_all(ns=repo_name)
         log.info("  pgvector: 删除 %d 条代码块", deleted)
@@ -563,7 +563,7 @@ def reset_db(repo_name: str = "flask") -> bool:
 
     # 2. Neo4j — 删除所有节点和关系
     try:
-        from domain_skills.db.neo4jgraph import Neo4jStore
+        from mcp_server.db.neo4jgraph import Neo4jStore
         store = Neo4jStore()
         deleted = store.delete_all(ns=repo_name)
         log.info("  Neo4j: 删除 %d 个节点", deleted)
@@ -573,7 +573,7 @@ def reset_db(repo_name: str = "flask") -> bool:
 
     # 3. Meilisearch — 删除所有文档
     try:
-        from domain_skills.db.meili import MeiliStore
+        from mcp_server.db.meili import MeiliStore
         store = MeiliStore()
         task_id = store.delete_all(ns=repo_name)
         log.info("  Meilisearch: 清空任务已提交 (task=%s)", task_id)
@@ -583,7 +583,7 @@ def reset_db(repo_name: str = "flask") -> bool:
 
     # 4. Redis — 清除状态和标记
     try:
-        from domain_skills.db.redis_cache import RedisCache
+        from mcp_server.db.redis_cache import RedisCache
         cache = RedisCache()
         cache.clear_repo_state(repo_name)
         log.info("  Redis: 已清除 repo_state:%s", repo_name)
@@ -635,7 +635,7 @@ class MatrixClient:
         """
         import urllib.request
 
-        self.dispatch_user_id = f"@manager:{_hiclaw_matrix_domain}"
+        self.dispatch_user_id = f"@coordinator:{_hiclaw_matrix_domain}"
 
         leader_binding = self._get_team_leader_binding_from_controller(team_name)
         controller_room_id = leader_binding.get("room_id", "")
@@ -688,6 +688,39 @@ class MatrixClient:
         if not room_ids:
             log.error("未找到任何 Matrix 房间，请先在 Element Web 中创建任务房间")
             return ""
+
+        # Priority 5: Find Team Room (room with coordinator + most other workers)
+        coordinator_user_id = f"@coordinator:{_hiclaw_matrix_domain}"
+        worker_user_ids = [
+            f"@{w}:{_hiclaw_matrix_domain}"
+            for w in ("coordinator", "analyzer", "fixer", "tester", "evaluator")
+        ]
+        best_room = ""
+        best_worker_count = 0
+        for room_id in room_ids:
+            try:
+                members_url = f"{self.hs}/_matrix/client/r0/rooms/{urllib.parse.quote(room_id)}/members"
+                members_req = urllib.request.Request(
+                    members_url, headers={"Authorization": f"Bearer {self.token}"}
+                )
+                with urllib.request.urlopen(members_req, timeout=5) as mr:
+                    members_body = json.loads(mr.read().decode())
+                member_ids = {ev.get("state_key", "") for ev in members_body.get("chunk", [])}
+                if coordinator_user_id in member_ids:
+                    worker_count = sum(1 for w in worker_user_ids if w in member_ids)
+                    if worker_count > best_worker_count:
+                        best_worker_count = worker_count
+                        best_room = room_id
+            except Exception:
+                continue
+        if best_room:
+            log.info(
+                "发现 Team Room (%d/%d workers): %s",
+                best_worker_count,
+                len(worker_user_ids),
+                best_room,
+            )
+            return best_room
 
         expected_team_room_name = f"team: {team_name}".lower()
         for room_id in room_ids:
@@ -827,10 +860,14 @@ class MatrixClient:
             f"{self.hs}/_matrix/client/r0/rooms/"
             f"{urllib.parse.quote(room_id)}/send/m.room.message/{txn_id}"
         )
+        # Build a mention link for formatted_body to meet openclaw-gateway requireMention
+        mention_html = f'<a href="https://matrix.to/#/{target_user_id}">{target_user_id.split(":")[0].lstrip("@")}</a>'
         payload = json.dumps(
             {
                 "msgtype": "m.text",
                 "body": msg,
+                "format": "org.matrix.custom.html",
+                "formatted_body": f"{mention_html} {msg}",
                 "m.mentions": {"user_ids": [target_user_id]},
             }
         ).encode()
@@ -866,7 +903,62 @@ class MatrixClient:
 # 完成检测
 # --------------------------------------------------------------------------- #
 
-def wait_for_completion(instance_id: str, timeout_sec: int = TASK_TIMEOUT_SEC) -> TaskResult:
+def _pull_minio_artifacts(instance_id: str, inst_dir: str) -> bool:
+    """从 MinIO 拉取 agent 发布的 artifacts (spec.md, plan.md, result.md, patch.diff)。"""
+    import subprocess
+    minio_prefix = f"hiclaw/hiclaw-storage/shared/tasks/{instance_id}"
+    files = ["spec.md", "plan.md", "result.md", "patch.diff"]
+    pulled = False
+    for fname in files:
+        local_path = os.path.join(inst_dir, fname)
+        try:
+            proc = subprocess.run(
+                ["docker", "exec", "hiclaw-controller", "mc", "cat",
+                 f"{minio_prefix}/{fname}"],
+                capture_output=True, timeout=10
+            )
+            if proc.returncode == 0 and proc.stdout:
+                with open(local_path, "wb") as f:
+                    f.write(proc.stdout)
+                log.info("从 MinIO 拉取: %s (%d bytes)", fname, len(proc.stdout))
+                pulled = True
+        except Exception:
+            pass
+    return pulled
+
+
+def _scan_matrix_verdict(matrix_client, room_id: str, instance_id: str) -> Optional[Dict[str, str]]:
+    """扫描 Matrix 房间中 agent 发回的 verdict 消息。"""
+    import urllib.request, re
+    try:
+        url = (f"{matrix_client.hs}/_matrix/client/r0/rooms/"
+               f"{urllib.parse.quote(room_id)}/messages?dir=b&limit=20")
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {matrix_client.token}"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = json.loads(r.read().decode())
+        for event in body.get("chunk", []):
+            if event.get("sender", "").startswith("@coordinator:"):
+                content = event.get("content", {})
+                msg_body = content.get("body", "")
+                m = re.search(r"Verdict:\s*(SUCCESS|FAIL)", msg_body)
+                if m:
+                    verdict = m.group(1)
+                    # Try to extract patch from the message
+                    patch = ""
+                    patch_m = re.search(r"```diff\s*\n(.*?)```", msg_body, re.DOTALL)
+                    if not patch_m:
+                        patch_m = re.search(r"```\s*\n(diff.*?|---.*?)(```|$)", msg_body, re.DOTALL)
+                    if patch_m:
+                        patch = patch_m.group(1).strip()
+                    return {"verdict": verdict.lower(), "patch": patch, "raw_message": msg_body[:500]}
+    except Exception:
+        pass
+    return None
+
+
+def wait_for_completion(matrix_client, room_id: str, instance_id: str, timeout_sec: int = TASK_TIMEOUT_SEC) -> TaskResult:
     """轮询等待任务完成（检查 MinIO / 共享文件系统）。"""
     result = TaskResult(instance_id=instance_id, status="running")
     start = time.time()
@@ -888,6 +980,30 @@ def wait_for_completion(instance_id: str, timeout_sec: int = TASK_TIMEOUT_SEC) -
     # #endregion
 
     while time.time() - start < timeout_sec:
+        # 检查 Matrix 消息中的 verdict（agent 通过聊天输出的结果）
+        verdict_from_matrix = _scan_matrix_verdict(matrix_client, room_id, instance_id)
+        if verdict_from_matrix:
+            result.status = "completed"
+            result.verdict = verdict_from_matrix.get("verdict", "unknown")
+            result.patch = verdict_from_matrix.get("patch", "")
+            log.info("从 Matrix 消息获取 verdict: %s verdict=%s", instance_id, result.verdict)
+            # 保存 verdict 和 artifacts 到本地
+            inst_dir = os.path.join(RESULTS_DIR, instance_id)
+            os.makedirs(inst_dir, exist_ok=True)
+            with open(os.path.join(inst_dir, "verdict.json"), "w") as f:
+                json.dump(verdict_from_matrix, f)
+            # 从 MinIO 拉取 agent 发布的 artifacts
+            _pull_minio_artifacts(instance_id, inst_dir)
+            # 从本地 MinIO artifacts 中读取 patch（如果有）
+            for fname in ["patch.diff", "result.md", "plan.md", "spec.md"]:
+                local_path = os.path.join(inst_dir, fname)
+                if os.path.exists(local_path):
+                    log.info("Artifact 已保存: %s", fname)
+            if result.patch:
+                with open(os.path.join(inst_dir, "patch.diff"), "w") as f:
+                    f.write(result.patch)
+            return result
+
         # 检查 verdict 文件（Evaluator 完成后写入）
         verdict_path = _find_verdict_file(instance_id)
         if verdict_path:
@@ -996,7 +1112,7 @@ def _find_verdict_file(instance_id: str) -> Optional[str]:
         container_path = f"/tmp/{sub}/verdict.json"
         try:
             r = subprocess.run(
-                ["docker", "exec", "hiclaw-worker-manager", "test", "-f", container_path],
+                ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
                 capture_output=True, timeout=3,
             )
             if r.returncode == 0:
@@ -1004,7 +1120,7 @@ def _find_verdict_file(instance_id: str) -> Optional[str]:
                 host_path = os.path.join(RESULTS_DIR, instance_id, "verdict.json")
                 os.makedirs(os.path.dirname(host_path), exist_ok=True)
                 subprocess.run(
-                    ["docker", "cp", f"hiclaw-worker-manager:{container_path}", host_path],
+                    ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
                     capture_output=True, timeout=5,
                 )
                 if os.path.exists(host_path):
@@ -1012,6 +1128,25 @@ def _find_verdict_file(instance_id: str) -> Optional[str]:
                     return host_path
         except Exception:
             continue
+    # fallback: openclaw Manager 把 verdict/result.md 写入 /root/{instance_id}/
+    container_path = f"/root/{instance_id}/result.md"
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
+            capture_output=True, timeout=3,
+        )
+        if r.returncode == 0:
+            host_path = os.path.join(RESULTS_DIR, instance_id, "result.md")
+            os.makedirs(os.path.dirname(host_path), exist_ok=True)
+            subprocess.run(
+                ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
+                capture_output=True, timeout=5,
+            )
+            if os.path.exists(host_path):
+                log.info("从容器复制 result.md: %s → %s", container_path, host_path)
+                return host_path
+    except Exception:
+        pass
     return None
 
 
@@ -1024,20 +1159,39 @@ def _find_diff_file(instance_id: str) -> Optional[str]:
         container_path = f"/tmp/{sub}/fix.diff"
         try:
             r = subprocess.run(
-                ["docker", "exec", "hiclaw-worker-manager", "test", "-f", container_path],
+                ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
                 capture_output=True, timeout=3,
             )
             if r.returncode == 0:
                 host_path = os.path.join(RESULTS_DIR, instance_id, "fix.diff")
                 os.makedirs(os.path.dirname(host_path), exist_ok=True)
                 subprocess.run(
-                    ["docker", "cp", f"hiclaw-worker-manager:{container_path}", host_path],
+                    ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
                     capture_output=True, timeout=5,
                 )
                 if os.path.exists(host_path):
                     return host_path
         except Exception:
             continue
+    # fallback: openclaw Manager 把 patch.diff 写入 /root/{instance_id}/
+    container_path = f"/root/{instance_id}/patch.diff"
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
+            capture_output=True, timeout=3,
+        )
+        if r.returncode == 0:
+            host_path = os.path.join(RESULTS_DIR, instance_id, "fix.diff")
+            os.makedirs(os.path.dirname(host_path), exist_ok=True)
+            subprocess.run(
+                ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
+                capture_output=True, timeout=5,
+            )
+            if os.path.exists(host_path):
+                log.info("从容器复制 patch.diff: %s → %s", container_path, host_path)
+                return host_path
+    except Exception:
+        pass
     return None
 
 
@@ -1296,7 +1450,7 @@ def clear_run_artifacts(instance_ids: List[str], results_dir: str) -> Dict[str, 
         short_id = instance_id.split("-")[-1]
         for sub in ["swe-bench", f"swe-{short_id}", instance_id]:
             subprocess.run(
-                ["docker", "exec", "hiclaw-worker-manager", "rm", "-rf", f"/tmp/{sub}"],
+                ["docker", "exec", "hiclaw-manager", "rm", "-rf", f"/tmp/{sub}"],
                 capture_output=True, timeout=3,
             )
 
@@ -1484,16 +1638,19 @@ def run(args: argparse.Namespace):
             continue
 
         # Step 2: 始终交给 repo_indexer 协调索引状态
-        ok = index_repo(repo_path, commit, ns)
-        if ok:
-            log.info("索引协调完成: commit=%s", commit[:8])
+        if args.skip_index:
+            log.info("跳过索引 (--skip-index): commit=%s", commit[:8])
         else:
-            log.error("索引失败 (commit=%s)，跳过该 commit 的所有 issue", commit[:8])
-            for inst in group:
-                result = TaskResult(inst.instance_id, status="failed", error="索引失败")
-                state.results[inst.instance_id] = result
-            state.save(state_path)
-            continue
+            ok = index_repo(repo_path, commit, ns)
+            if ok:
+                log.info("索引协调完成: commit=%s", commit[:8])
+            else:
+                log.error("索引失败 (commit=%s)，跳过该 commit 的所有 issue", commit[:8])
+                for inst in group:
+                    result = TaskResult(inst.instance_id, status="failed", error="索引失败")
+                    state.results[inst.instance_id] = result
+                state.save(state_path)
+                continue
 
         if args.index_only:
             state.save(state_path)
@@ -1541,7 +1698,7 @@ def run(args: argparse.Namespace):
                 "任务已提交，等待 Agent 流水线处理（Analyzer → Fixer → Tester → Evaluator）..."
                 " 可通过 Element Web (http://127.0.0.1:18088) 观察 Agent 对话过程"
             )
-            result = wait_for_completion(inst.instance_id)
+            result = wait_for_completion(matrix, room_id, inst.instance_id)
             result.duration_sec = time.time() - start_time
 
             # Step 3c: 评估 patch
@@ -1610,6 +1767,7 @@ def main():
     ap.add_argument("--list", action="store_true", help="仅列出 Flask instances")
     ap.add_argument("--dry-run", action="store_true", help="打印计划，不实际操作")
     ap.add_argument("--index-only", action="store_true", help="仅索引仓库，不提交任务")
+    ap.add_argument("--skip-index", action="store_true", help="跳过数据库索引（离线测试用）")
     ap.add_argument("--skip-submit", action="store_true", help="跳过 Matrix 提交（仅索引+本地验证）")
     ap.add_argument("--issue-index", type=int, default=0,
                     help="只运行第 N 个 issue（按 --list 顺序，1-based；每次都会重新跑该 issue）")

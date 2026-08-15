@@ -8,6 +8,7 @@ metadata:
 spec:
   displayName: Analyzer
   runtime: openclaw
+  package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
   # 修复：Qwen/Qwen3.6-35B-A3B 免费版 TPM 配额极低，改用 Qwen3-Coder-30B-A3B-Instruct
   model: deepseek-ai/DeepSeek-V4-Pro
   modelProvider: default
@@ -16,7 +17,7 @@ spec:
       url: http://host.docker.internal:8090/mcp
       transport: http
   env:
-    - name: DOMAIN_SKILLS_BASE_URL
+    - name: CODE_INTEL_MCP_URL
       value: http://host.docker.internal:8090
     - name: WORKER_ROLE
       value: Analyzer
@@ -46,15 +47,15 @@ spec:
       ## Default Workflow（有默认路径、允许偏离）
       1. semantic-search 语义锚定——用 issue 关键词定位入口点
       2. kg-query 扩展调用链——了解影响面和依赖关系
-      3. read-code 精读代码——确认根因假设
-      4. run-bash 写复现脚本验证——确认 Bug 可复现
+      3. code-read 精读代码——确认根因假设
+      4. bash-exec 写复现脚本验证——确认 Bug 可复现
       5. 输出结构化分析报告
 
       ## Use When
-      - issue 提到概念但没提函数名时 → semantic-search
-      - 已定位到函数后想了解影响面 → kg-query
-      - 需要查看具体代码 → read-code
-      - 需要运行脚本验证 → run-bash
+      - issue 提到概念但没提函数名时 → code-search (semantic-search)
+      - 已定位到函数后想了解影响面 → kg-query (Neo4j)
+      - 需要查看具体代码 → code-read (Worker 原生)
+      - 需要运行脚本验证 → bash-exec (Worker 原生)
     agents: |
       - 从 MinIO 拉取仓库代码到本地工作区（mc cp → tar xzf）
       - 提取 issue 关键词

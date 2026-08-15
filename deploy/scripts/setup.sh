@@ -49,9 +49,9 @@ REPO_ROOT="${SCRIPT_DIR}/../.."
 DEPLOY_DIR="${REPO_ROOT}/deploy"
 AGENTTEAMS_ENV="${DEPLOY_DIR}/install/agentteams.env"
 LOCAL_MANAGER_ENV="${HOME}/hiclaw-manager.env"
-PROJECT_PYTHON="${DOMAIN_SKILLS_PYTHON:-/opt/anaconda3/envs/GoAI/bin/python}"
+PROJECT_PYTHON="${CODE_INTEL_PYTHON:-/opt/anaconda3/envs/GoAI/bin/python}"
 if [[ ! -x "${PROJECT_PYTHON}" ]]; then
-  PROJECT_PYTHON="${DOMAIN_SKILLS_PYTHON:-python3}"
+  PROJECT_PYTHON="${CODE_INTEL_PYTHON:-python3}"
 fi
 LEGACY_WORKERS=(planner reasoner retriever verifier editor impact-analyst)
 
@@ -562,7 +562,7 @@ wait_for "AgentTeams controller" "docker exec hiclaw-controller hiclaw status" 1
   echo "  hiclaw apply -f deploy/workers/fixer.yaml"
   echo "  hiclaw apply -f deploy/workers/tester.yaml"
   echo "  hiclaw apply -f deploy/workers/evaluator.yaml"
-  echo "  hiclaw apply -f deploy/templates/rd-defect-team.yaml"
+  echo "  hiclaw apply -f deploy/teams/rd-defect-team.yaml"
 }
 
 if docker exec hiclaw-controller hiclaw status >/dev/null 2>&1; then
@@ -634,11 +634,17 @@ fi
 set -a; source "${DB_ENV}"; set +a
 cd "${REPO_ROOT}"
 "${PROJECT_PYTHON}" -c "
-import sys; sys.path.insert(0, 'domain_skills')
+import sys; sys.path.insert(0, 'mcp_server')
 from db.schema import ensure_all
 ensure_all(ns='init')
 print('schema 初始化完成')
 " 2>/dev/null && ok "数据库 schema 已初始化" || warn "schema 初始化跳过（依赖未安装时正常）"
+
+# ––– 构建 AgentTeams Skills 包 –––
+if [[ ! -f "${REPO_ROOT}/deploy/packages/rd-defect-skills-v0.1.1.zip" ]]; then
+  info "构建 AgentTeams Skills 包..."
+  bash "${REPO_ROOT}/deploy/scripts/build-skills-package.sh" && ok "Skills 包已构建" || warn "Skills 包构建失败"
+fi
 
 echo ""
 echo "=========================================="

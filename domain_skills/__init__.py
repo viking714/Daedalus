@@ -1,1 +1,0 @@
-# Domain skill service package.

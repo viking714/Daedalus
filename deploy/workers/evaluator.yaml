@@ -8,16 +8,17 @@ metadata:
 spec:
   displayName: Evaluator
   runtime: openclaw
+  package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
   # 修复：原模型名 deepseek/deepseek-v3.2 在 SiliconFlow 上不存在（400），
   # 实际模型 ID 为 deepseek-ai/DeepSeek-V3.2（已验证 200 且 TPM 宽松）
-  model: Pro/deepseek-ai/DeepSeek-V3.2
+  model: deepseek-ai/DeepSeek-V4-Pro
   modelProvider: default
   mcpServers:
     - name: domain-skills
       url: http://host.docker.internal:8090/mcp
       transport: http
   env:
-    - name: DOMAIN_SKILLS_BASE_URL
+    - name: CODE_INTEL_MCP_URL
       value: http://host.docker.internal:8090
     - name: WORKER_ROLE
       value: Evaluator

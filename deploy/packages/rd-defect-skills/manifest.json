@@ -1,0 +1,54 @@
+{
+  "name": "rd-defect-skills",
+  "version": "0.1.1",
+  "description": "研发缺陷闭环协同系统 AgentTeams Skills 包 —— 15 个 Skills（6 prompt-only + 9 with-scripts）",
+  "author": "Daedalus Team",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/your-org/Daedalus",
+  "skills": {
+    "prompt_only": [
+      "code-read",
+      "bash-exec",
+      "test-run",
+      "patch-generate",
+      "result-judge",
+      "multi-file-edit"
+    ],
+    "with_scripts": [
+      "repo-index",
+      "code-search",
+      "impact-analysis",
+      "root-cause-analysis",
+      "repair-planning",
+      "pipeline-router",
+      "module-lookup",
+      "lesson-lookup",
+      "knowledge-extraction"
+    ]
+  },
+  "workers": {
+    "manager":   ["repo-index", "pipeline-router", "code-read", "bash-exec"],
+    "analyzer":  ["code-read", "bash-exec", "code-search", "impact-analysis", "root-cause-analysis", "module-lookup", "lesson-lookup"],
+    "fixer":     ["code-read", "bash-exec", "patch-generate", "multi-file-edit", "repair-planning", "lesson-lookup"],
+    "tester":    ["bash-exec", "test-run", "result-judge"],
+    "evaluator": ["code-read", "bash-exec", "impact-analysis", "result-judge", "knowledge-extraction"]
+  },
+  "mcp_server": {
+    "name": "code-intelligence",
+    "endpoint": "http://host.docker.internal:8090/mcp",
+    "transport": "http",
+    "primitives": [
+      "pgvector_search", "pgvector_fetch", "pgvector_upsert_chunk", "pgvector_delete",
+      "meili_keyword_search",
+      "neo4j_expand_chunks", "neo4j_impact_stats", "neo4j_symbol_lookup", "neo4j_dep_subgraph",
+      "embed_texts",
+      "redis_get_repo_state", "redis_set_repo_state", "redis_fetch_embedding",
+      "ast_parse_file",
+      "hybrid_search"
+    ]
+  },
+  "changelog": {
+    "0.1.1": "统一命名: knowledge_miner → knowledge-extraction; result_judge 从 MCP 工具转为 prompt-only Skill; 新增 MCP 原语层（14 个细粒度数据访问原语）",
+    "0.1.0": "初始版本: 16 个 MCP 技能扁平注册"
+  }
+}

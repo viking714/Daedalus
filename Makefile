@@ -1,5 +1,8 @@
-run-domain-skills:
-        /opt/anaconda3/envs/GoAI/bin/python domain_skills/mcp_server.py
+run-mcp-server:
+	/opt/anaconda3/envs/GoAI/bin/python mcp_server/server.py
+
+build-package:
+	bash deploy/scripts/build-skills-package.sh
 
 install-agentteams:
 	bash deploy/install/install_agentteams.sh
@@ -14,7 +17,7 @@ stop:
 	bash deploy/scripts/start.sh stop
 
 test:
-	python -m py_compile domain_skills/mcp_server.py domain_skills/skills.py
+	python -m py_compile mcp_server/server.py mcp_server/composed_tools.py mcp_server/mcp_primitives.py
 
 swe-bench:
 	python scripts/swe_bench_runner.py

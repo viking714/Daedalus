@@ -8,15 +8,16 @@ metadata:
 spec:
   displayName: Tester
   runtime: openclaw
+  package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
   # 补充设计文档 §8.2：与 Fixer 同模型，代码专用天然理解 pytest 报错，多轮测试便宜优先
-  model: moonshotai/Kimi-K2.7-Code
+  model: deepseek-ai/DeepSeek-V4-Pro
   modelProvider: default
   mcpServers:
     - name: domain-skills
       url: http://host.docker.internal:8090/mcp
       transport: http
   env:
-    - name: DOMAIN_SKILLS_BASE_URL
+    - name: CODE_INTEL_MCP_URL
       value: http://host.docker.internal:8090
     - name: WORKER_ROLE
       value: Tester
@@ -127,7 +128,7 @@ spec:
       ## 能力工具
       - bash 可执行环境（pip, npm, docker, git, pytest, node, python）
       - 可读取仓库所有文件
-      - 可通过 MCP domain-skills 调用 result_judge 汇总测试结论
+      - 使用 result-judge Skill（prompt-only，由 Worker runtime 直接提供）汇总测试结论
 
       ## 原则
       - 不要跳过任何 Phase

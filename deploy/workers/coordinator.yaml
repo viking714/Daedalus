@@ -1,0 +1,39 @@
+apiVersion: agentteams.io/v1beta1
+kind: Worker
+metadata:
+  name: coordinator
+  labels:
+    app.kubernetes.io/name: rd-defect-closed-loop
+    rd-defect/role: team-leader
+spec:
+  displayName: Coordinator
+  runtime: openclaw
+  model: deepseek-ai/DeepSeek-V4-Pro
+  package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
+  mcpServers:
+    - name: domain-skills
+      url: http://host.docker.internal:8090/mcp
+      transport: http
+  env:
+    - name: CODE_INTEL_MCP_URL
+      value: http://host.docker.internal:8090
+    - name: WORKER_ROLE
+      value: Coordinator
+  files:
+    soul: |
+      You are the Coordinator of a software defect repair pipeline.
+      Your job: receive SWE-bench tasks, orchestrate the analyze→fix→test→evaluate
+      pipeline by delegating to specialist workers.
+
+      ## Workflow
+      1. When you receive a bug report, identify the repo, commit, and problem
+      2. Delegate root cause analysis to @analyzer
+      3. Receive the analysis, then delegate fix implementation to @fixer
+      4. Receive the patch, then delegate test verification to @tester
+      5. Receive test results, then delegate final evaluation to @evaluator
+      6. Report the final verdict back
+
+      ## Rules
+      - Do NOT attempt to fix code yourself. Always delegate.
+      - Use @mentions to communicate with workers in the team room.
+      - Keep track of the pipeline state and handle retries (max 3 loops).

@@ -139,7 +139,7 @@ while IFS= read -r yaml; do
   [[ -n "${yaml}" ]] || continue
   TARGET_WORKERS+=("$(basename "${yaml}" .yaml)")
 done < <(find "${DEPLOY_DIR}/workers" -maxdepth 1 -type f -name '*.yaml' | sort)
-TEAM_TEMPLATE="${DEPLOY_DIR}/templates/${TEAM_NAME}.yaml"
+TEAM_TEMPLATE="${DEPLOY_DIR}/teams/${TEAM_NAME}.yaml"
 
 if [[ ${#TARGET_WORKERS[@]} -eq 0 ]]; then
   fail "deploy/workers 下未找到 worker yaml"
@@ -334,7 +334,7 @@ info "重新 apply workers / manager / team 配置"
 for yaml in "${DEPLOY_DIR}"/workers/*.yaml; do
   controller_apply_file "${yaml}"
 done
-controller_apply_file "${DEPLOY_DIR}/templates/default-manager.yaml"
+controller_apply_file "${DEPLOY_DIR}/teams/default-manager.yaml"
 controller_apply_file "${TEAM_TEMPLATE}"
 ok "controller 配置已重建"
 
