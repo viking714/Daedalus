@@ -5,7 +5,10 @@ def ensure_all(ns: str = "") -> None:
     from .pgvector import PgVectorStore
     from .neo4jgraph import Neo4jStore
     from .meili import MeiliStore
+    from .lessons import LessonsStore
 
     PgVectorStore().ensure_schema()
     Neo4jStore().ensure_schema()
     MeiliStore().ensure_schema(ns=ns)
+    # 经验库（lessons）与代码索引无关，但统一在此幂等初始化。
+    LessonsStore().ensure_schema()

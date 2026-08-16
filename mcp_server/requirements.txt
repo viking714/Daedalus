@@ -1,0 +1,22 @@
+# MCP Server 运行依赖
+# 安装：pip install -r mcp_server/requirements.txt
+
+# MCP SDK
+mcp[cli]>=1.0
+
+# 数据层
+psycopg2-binary>=2.9
+redis>=5.0
+meilisearch>=0.30
+neo4j>=5.0
+
+# 向量化与代码解析
+openai>=1.0
+sentence-transformers>=2.5
+tree-sitter>=0.20
+tree-sitter-python>=0.20
+
+# 可观测（可选；不安装时 telemetry 自动降级为 no-op）
+opentelemetry-api>=1.24
+opentelemetry-sdk>=1.24
+opentelemetry-exporter-otlp>=1.24

@@ -1,16 +1,16 @@
-"""MCP Server for code-intelligence domain skills（mcp_server/mcp_server.py）。
+"""MCP Server for code-intelligence domain skills（mcp_server/server.py）。
 
 三层架构（对齐方案设计 v2.2 §3.1）：
   Worker (AgentTeams)
     → 调用 MCP Tools（通过 mcporter / Higress AI Gateway）
     → MCP 层（本文件）：暴露两类工具
-        ① 数据访问原语（13+1 个，来自 mcp_primitives.py）— 细粒度，"数据怎么取"
+        ① 数据访问原语（14 个，来自 mcp_primitives.py）— 细粒度，"数据怎么取"
         ② 组合工具（来自 composed_tools.py）— 编排原语，完成工作流
     → 数据层（pgvector / Neo4j / Meilisearch / Redis / embedding / AST）
 
 Usage:
-    python mcp_server/mcp_server.py                # default port 8090
-    python mcp_server/mcp_server.py --port 9090    # custom port
+    python mcp_server/server.py                # default port 8090
+    python mcp_server/server.py --port 9090    # custom port
 
 Architecture:
     Worker (inside container)
@@ -27,6 +27,8 @@ import logging
 import os
 import sys
 from typing import Any
+
+from mcp_server.telemetry import init_telemetry, instrument
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("mcp_server")
@@ -118,7 +120,8 @@ _PRIMITIVES = [
 
 
 def _register_primitive_tool(name: str, description: str, handler_fn):
-    """将原语函数注册为 MCP tool。"""
+    """将原语函数注册为 MCP tool，并自动包一层 OTel Span。"""
+    @instrument(name=f"mcp.primitive.{name}")
     def tool_handler(**kwargs: Any) -> str:
         try:
             result = handler_fn(**kwargs)
@@ -134,7 +137,8 @@ def _register_primitive_tool(name: str, description: str, handler_fn):
 
 
 def _register_skill_tool(skill_name: str):
-    """将 composed_tools.py 中的组合工具注册为 MCP tool。"""
+    """将 composed_tools.py 中的组合工具注册为 MCP tool，并自动包一层 OTel Span。"""
+    @instrument(name=f"mcp.skill.{skill_name}")
     def tool_handler(**kwargs: Any) -> str:
         skill = get_skill(skill_name)
         if not skill:
@@ -192,6 +196,7 @@ def health_status() -> str:
 
 
 def main() -> None:
+    init_telemetry()
     port = int(os.getenv("MCP_PORT", os.getenv("PORT", "8090")))
     host = os.getenv("MCP_HOST", "0.0.0.0")
     logger.info(

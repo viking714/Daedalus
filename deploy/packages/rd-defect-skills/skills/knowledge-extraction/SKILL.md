@@ -38,8 +38,8 @@ Evaluator 产出 `verdict.json` 后，将修复经验结构化沉淀。
 ## 调用条件
 Evaluator 产出 `verdict.json` 后立即调用；不论 pass/reject 均触发。
 
-## 依赖 MCP 原语
-`pgvector_search`（去重比对）/ `pgvector_upsert_chunk`（写入）/ `embed_texts`（向量化）
+## 依赖
+`mcp_server/db/lessons.py`（LessonsStore：去重合并写入）/ `embed_texts`（向量化）
 
 ## 写入前去重策略
 ```
@@ -50,13 +50,13 @@ score [0.85, 0.95) → SIMILAR（插入新行，记录 related_to）
 score < 0.85  → NEW（全新案例）
 ```
 
-> **注意**：完整实现（`lessons` 表 + 去重合并逻辑）计划在第二步（经验沉淀闭环）中完成。
-> 当前轻量实现为标签抽取（从 `skills.py` 迁移至此脚本）。
+> `lessons` 表由 `LessonsStore.ensure_schema` 幂等创建（`schema.ensure_all` 已接入）。
+> 写入前经 `LessonsStore.upsert_with_dedup` 自动去重合并，完整落地 MERGE/SIMILAR/NEW 三级决策。
 
 ## 失败处理
-- `lessons` 表不存在 → 降级为仅标签抽取
-- 字段抽取失败 → 跳过该字段、记录 `incomplete_fields`
-- 写入前去重比对失败 → 保守标记为 `NEW`
+- `lessons` 表不可用（未建表/连接失败）→ 返回 `unavailable`，携带已抽取字段（不阻塞主流程）
+- `root_cause` 为空 → 返回 `error`（无法向量化）
+- 写入前去重比对失败 → 由 LessonsStore 抛 DbUnavailable，上层保守降级
 
 ## 复用价值
 **中**。仅 Evaluator 使用；可作为"经验沉淀引擎"独立推广。

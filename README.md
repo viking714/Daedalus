@@ -58,19 +58,9 @@ Worker 间通过 MinIO 共享存储交换文件（仓库拉取、产物传递）
 
 以下内容记录了当前实现与 `docs/03_新初赛提交/方案设计.md`（v2.2）之间的主要偏差，需逐步修正以设计为准。条目按优先级排列。
 
-> 已完成项（已从本清单移除）：Skill 分层架构（三层模型）、Skills 打包体系（`deploy/packages/rd-defect-skills/` + SemVer）、6 prompt-only + 9 with-scripts Skills 结构、Skill 命名统一（`knowledge_miner` → `knowledge-extraction`）、`result-judge` 归属（转 prompt-only）、`domain_skills/` 目录收归 `mcp_server/`。
-
-### P0 — 高优先级（经验沉淀闭环）
-
-- **[经验沉淀闭环] 骨架已建，`lessons` 表与去重策略未落地**
-  - 偏差：设计 §5 定义 `lessons` 表（PostgreSQL + pgvector）、`lesson-lookup` Skill（Analyzer/Fixer 查询历史经验）、`knowledge-extraction` Skill（Evaluator 写入经验）、去重策略（MERGE/SIMILAR/NEW 三级相似度判断）。当前 Skill 骨架已就位（`lesson-lookup` / `knowledge-extraction` 的 SKILL.md + scripts/），但 `lessons` 表未创建，脚本为占位实现（`lesson_lookup.py` 返回空集并降级，`extract.py` 仅做标签抽取）。
-  - 建议：① 在 `mcp_server/db/schema.py` 新增 `lessons` 建表语句；② 在 `lesson_lookup.py` 接入 pgvector 相似度查询与三级分流（HIGH/MEDIUM/LOW）；③ 在 `extract.py` 实现结构化字段抽取 + 写入前去重（MERGE/SIMILAR/NEW）。
+> 已完成项（已从本清单移除）：Skill 分层架构（三层模型）、Skills 打包体系（`deploy/packages/rd-defect-skills/` + SemVer）、6 prompt-only + 9 with-scripts Skills 结构、Skill 命名统一（`knowledge_miner` → `knowledge-extraction`）、`result-judge` 归属（转 prompt-only）、`domain_skills/` 目录收归 `mcp_server/`、经验沉淀闭环（`lessons` 表 + `lesson-lookup`/`knowledge-extraction` 落地 + MERGE/SIMILAR/NEW 去重合并）、全链路监控（AgentLoop 控制台接入凭证已配置 + MCP Server 层 OTel 手动埋点已实现 + `setup-agentloop.sh` 一键接入脚本）。
 
 ### P1 — 中优先级（重要功能缺失）
-
-- **[全链路监控（AgentLoop / OpenTelemetry）] 整个 §6 未实现**
-  - 偏差：设计 §6 要求通过 AgentLoop/OpenTelemetry 实现链路追踪、Agent 总览、异常审计。当前 `mcp_server/server.py` 无 OTel 埋点，`start.sh` 无 AgentLoop 相关启动配置，`deploy/agentloop.env` 不存在。
-  - 建议：① 创建 `deploy/agentloop.env` 配置 OTLP 端点与凭证；② 在 `mcp_server/server.py` 统一入口为每个 MCP 原语调用生成 Span（埋点即监控，实现 OTel 手动埋点）；③ 在 `start.sh` 中用 `opentelemetry-instrument` 包装 MCP Server 启动。
 
 - **[灰度发布] 整个 §4 未实现**
   - 偏差：设计 §4 定义 Manager 生成 `release_plan.json`、进入 `awaiting_release` 状态、事件驱动唤醒、canary 超时哨兵（24h TTL）、回归闭环（`regression_cycle_count`，上限 3 次）。当前均不存在。

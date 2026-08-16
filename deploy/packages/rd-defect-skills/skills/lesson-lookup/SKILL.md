@@ -38,19 +38,20 @@ Analyzer (主用) / Fixer (主用)
 - Analyzer 在根因分析前/中调用（mode=analyzer）
 - Fixer 在生成 patch 前调用（mode=fixer）
 
-## 依赖 MCP 原语
-`pgvector_search` / `embed_texts`
+## 依赖
+`mcp_server/db/lessons.py`（LessonsStore：语义检索）/ `embed_texts`（向量化）
 
 ## 执行方式
-`lesson_lookup.py` 负责业务编排：相似度计算 + 分级 + 结果格式化。
+`lesson_lookup.py` 负责业务编排：向量化 query → 调用 `LessonsStore.search_similar` →
+按相似度 score 三级分流（HIGH ≥ 0.85 / MEDIUM 0.60~0.85 / LOW < 0.60）。
 
-> **注意**：此 Skill 依赖 `lessons` 表（设计 §5.2），该表计划在第二步（经验沉淀闭环）中实现。
-> 当前为占位脚本，`lessons` 表不可用时返回空集并降级为"按标准流程执行"。
+> `lessons` 表由 `LessonsStore.ensure_schema` 幂等创建（`schema.ensure_all` 已接入）。
+> 表不可用（连接失败/未建表）时返回空集并降级为"按标准流程执行"，不抛异常。
 
 ## 失败处理
-- `lessons` 表不存在 → 返回空集 + 降级提示
-- 召回为空 → 返回 LOW 级别空集
-- 向量检索超时 → 降级为标签匹配
+- `lessons` 表不可用（未建表/连接失败）→ 返回空集 + 降级提示
+- 召回为空 → 返回空集（high/medium/low 均为空）
+- 向量化失败 → 返回 `status: error`
 
 ## 复用价值
 **高**。Analyzer / Fixer 共用，是经验沉淀闭环的关键入口。

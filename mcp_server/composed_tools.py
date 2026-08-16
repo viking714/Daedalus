@@ -45,6 +45,7 @@ from mcp_server.db.neo4jgraph import Neo4jStore
 from mcp_server.db.meili import MeiliStore
 from mcp_server.db.redis_cache import RedisCache
 from mcp_server.db.schema import ensure_all
+from mcp_server.db.lessons import LessonsStore
 from mcp_server.embed.embeddings import EmbeddingService
 from mcp_server.code.ast_parser import AstParser
 
@@ -789,27 +790,57 @@ def skill_result_judge(payload: dict) -> dict:
     }
 
 
-@register("knowledge_extraction", "Evaluator", "知识沉淀：从根因/裁定中抽取可复用模式与标签（原名 knowledge_miner）")
+@register("knowledge_extraction", "Evaluator", "知识沉淀：从根因/裁定中抽取经验并写入 lessons 表（带去重合并）")
 def skill_knowledge_extraction(payload: dict) -> dict:
     """经验抽取技能——对齐方案设计 v2.2 §5.3，Evaluator 裁定完成后调用。
 
-    设计命名：设计文档中 Evaluator 的经验沉淀 Skill 名为 knowledge-extraction，
-    本函数原名 knowledge_miner，v0.1.1 起统一为 knowledge-extraction。
+    从 payload 抽取结构化字段，向量化 root_cause 后调用
+    LessonsStore.upsert_with_dedup 完成写入前去重（MERGE/SIMILAR/NEW）。
 
-    当前为轻量实现（标签抽取）。完整实现需对接 §5.2 的 lessons 表、
-    §5.3 的去重策略（MERGE/SIMILAR/NEW）和 §5.4 的查询复用逻辑，
-    计划在第二步（经验沉淀闭环）中完成。
+    注：本组合工具为 MCP 路径入口（字段由调用方通过 payload 提供）；
+    完整字段抽取（从 fix_diff/test_report/verdict 自动提取）见
+    AgentTeams Skill 脚本 knowledge-extraction/scripts/extract.py。
     """
     root_cause = payload.get("root_cause") or ""
-    final_decision = payload.get("final_decision") or ""
-    stop = {"the", "and", "for", "with", "that", "this", "from", "into", "when", "error", "null"}
-    keywords = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", root_cause)
-    tags = sorted({k.lower() for k in keywords if k.lower() not in stop})[:10]
+    if not root_cause:
+        return {"status": "error", "reason": "root_cause required"}
+
+    decision = str(payload.get("final_decision") or payload.get("decision") or "").lower()
+    success = decision == "pass"
+
+    lesson = {
+        "repo": payload.get("repo") or "",
+        "task_id": payload.get("task_id") or "",
+        "root_cause": root_cause,
+        "fix_pattern": payload.get("fix_pattern"),
+        "error_signature": payload.get("error_signature"),
+        "fix_strategy": payload.get("fix_strategy"),
+        "affected_modules": payload.get("affected_modules") or [],
+        "tags": payload.get("tags") or [],
+        "diff_summary": payload.get("diff_summary"),
+        "test_changes": payload.get("test_changes"),
+        "edge_cases": payload.get("edge_cases") or [],
+        "success": success,
+        "resolution_summary": payload.get("resolution_summary"),
+        "retry_count": int(payload.get("retry_count") or 0),
+        "merge_count": 1,
+    }
+
+    try:
+        emb = EmbeddingService()
+        vec = emb.embed([root_cause])[0]
+        result = LessonsStore().upsert_with_dedup(lesson, vec)
+    except DbUnavailable as e:
+        return {"status": "unavailable", "reason": str(e), "lesson": lesson}
+
     return {
-        "knowledge_id": _rand("KM"),
-        "pattern": (root_cause or "unknown")[:200],
-        "tags": tags,
-        "source_decision": final_decision,
+        "status": "ok",
+        "decision": result["decision"],
+        "lesson_id": result["lesson_id"],
+        "knowledge_id": result["lesson_id"],
+        "related_to": result["related_to"],
+        "score": result["score"],
+        "success": success,
     }
 
 
