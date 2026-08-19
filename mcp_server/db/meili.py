@@ -15,6 +15,8 @@
 第三方 SDK meilisearch 懒加载。
 """
 
+import hashlib
+
 from .base import DbUnavailable
 from .config import get_config
 
@@ -24,6 +26,17 @@ DEFAULT_INDEX = "code_chunks"
 def _index_name(ns: str = "") -> str:
     """按命名空间生成索引名。ns 为空时用默认名。"""
     return ns if ns else DEFAULT_INDEX
+
+
+def _meili_key(chunk_id: str) -> str:
+    """生成 Meilisearch 合法主键。
+
+    Meilisearch 主键仅允许 [a-zA-Z0-9_-]，而 chunk_id 形如
+    `docs/conf.py:github_link:69`，含 / : . 等非法字符，直接作主键会导致
+    add_documents 失败（Document identifier ... is invalid）。
+    这里用 sha1 生成安全主键，原始 chunk_id 保留为普通字段供检索结果返回。
+    """
+    return hashlib.sha1(chunk_id.encode("utf-8")).hexdigest()
 
 
 class MeiliStore:
@@ -57,7 +70,7 @@ class MeiliStore:
         if self._client is None:
             self._connect()
         idx_name = _index_name(ns)
-        task = self._client.create_index(idx_name, {"primaryKey": "chunk_id"})
+        task = self._client.create_index(idx_name, {"primaryKey": "meili_key"})
         self._client.wait_for_task(task.task_uid)
         task = self._client.index(idx_name).update_searchable_attributes(
             ["content", "symbol", "path"]
@@ -70,11 +83,17 @@ class MeiliStore:
         self.batch_upsert([chunk], ns=ns)
 
     def batch_upsert(self, chunks: list, ns: str = "") -> None:
-        """批量写入文档（一次 add_documents 请求，避免逐条往返）。"""
+        """批量写入文档（一次 add_documents 请求，避免逐条往返）。
+
+        主键为 meili_key（chunk_id 的 sha1），原始 chunk_id 保留为普通字段。
+        写入后 wait_for_task，确保异步任务真正落盘（否则 add_documents 失败
+        会静默丢失，表现为索引 0 文档）。
+        """
         if not chunks:
             return
         docs = [
             {
+                "meili_key": _meili_key(c["chunk_id"]),
                 "chunk_id": c["chunk_id"],
                 "ns": ns,
                 "repo": c.get("repo"),
@@ -85,7 +104,8 @@ class MeiliStore:
             }
             for c in chunks
         ]
-        self._idx(ns).add_documents(docs)
+        task = self._idx(ns).add_documents(docs)
+        self._client.wait_for_task(task.task_uid)
 
     def keyword_search(self, query: str, top_k: int = 10, ns: str = "") -> list:
         hits = self._idx(ns).search(query, {"limit": top_k}).get("hits", [])
@@ -112,10 +132,10 @@ class MeiliStore:
         deleted = 0
         idx = self._idx(ns)
         for path in paths:
-            # 查询该路径下的所有 chunk_id
+            # 查询该路径下的所有文档，取主键 meili_key 删除
             hits = idx.search("", {"filter": f'path = "{path}"', "limit": 1000}).get("hits", [])
             if hits:
-                ids = [h["chunk_id"] for h in hits]
+                ids = [h["meili_key"] for h in hits]
                 idx.delete_documents(ids)
                 deleted += len(ids)
         return deleted

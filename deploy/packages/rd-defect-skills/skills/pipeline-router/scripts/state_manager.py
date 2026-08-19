@@ -18,6 +18,10 @@ MAX_FILES = 5
 TOKEN_BUDGET = 100000
 TASK_TIMEOUT_MIN = 30
 
+# 灰度发布阈值（对齐方案设计 v2.2 §4.5 / §4.6）
+REGRESSION_CYCLE_MAX = 3      # 回归闭环上限，超限转 escalated
+CANARY_TIMEOUT_MIN = 24 * 60  # awaiting_release 超时哨兵 TTL（默认 24h）
+
 
 class _StateStore:
     """TaskState 的轻量内存实现（状态机 + 闭环阈值闸门）。"""
@@ -69,7 +73,8 @@ def manage_state(task_id: str, from_stage: str = None,
                  to_stage: str = None, owner_agent: str = None,
                  reason: str = "", round_num: int = None,
                  modified_files_count: int = None,
-                 tokens_used: int = None) -> dict:
+                 tokens_used: int = None,
+                 regression_cycle_count: int = None) -> dict:
     """TaskState 迁移 + 闭环阈值闸门。
 
     Args:
@@ -81,6 +86,7 @@ def manage_state(task_id: str, from_stage: str = None,
         round_num: 当前轮次
         modified_files_count: 修改文件数
         tokens_used: 已使用 token 数
+        regression_cycle_count: 灰度回归次数（超限转 escalated）
 
     Returns:
         {accepted, state_version, state, compress?, decision?}
@@ -92,8 +98,14 @@ def manage_state(task_id: str, from_stage: str = None,
     if round_num is not None and round_num > MAX_ROUND:
         return {
             "accepted": False,
-            "decision": "handoff",
+            "decision": "escalated",
             "reason": f"round {round_num} exceeds max_round={MAX_ROUND}",
+        }
+    if regression_cycle_count is not None and regression_cycle_count > REGRESSION_CYCLE_MAX:
+        return {
+            "accepted": False,
+            "decision": "escalated",
+            "reason": f"regression cycle {regression_cycle_count} exceeds max={REGRESSION_CYCLE_MAX}",
         }
     if modified_files_count is not None and modified_files_count > MAX_FILES:
         return {
@@ -112,9 +124,16 @@ def manage_state(task_id: str, from_stage: str = None,
         started = datetime.fromisoformat(st["started_at"])
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         if elapsed > TASK_TIMEOUT_MIN * 60:
-            return {"accepted": False, "decision": "handoff", "reason": "task timeout"}
+            return {"accepted": False, "decision": "escalated", "reason": "task timeout"}
     if not st:
         extra["started_at"] = datetime.now(timezone.utc).isoformat()
+
+    # awaiting_release 记录进入时间，供 canary_watchdog 判定 TTL
+    if to_stage == "awaiting_release":
+        extra["release_entered_at"] = datetime.now(timezone.utc).isoformat()
+    # 回归次数回灌（由 release_decision 决策回滚时递增并携带）
+    if regression_cycle_count is not None:
+        extra["regression_cycle_count"] = regression_cycle_count
 
     result = _STATE_STORE.transition(
         task_id=task_id,

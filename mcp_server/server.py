@@ -22,13 +22,12 @@ Architecture:
       → PostgreSQL / Neo4j / Meilisearch / Redis (via SSH tunnel)
 """
 
+import functools
 import json
 import logging
 import os
 import sys
 from typing import Any
-
-from mcp_server.telemetry import init_telemetry, instrument
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("mcp_server")
@@ -48,6 +47,8 @@ except ImportError:
         "MCP SDK not installed. Run: pip install 'mcp[cli]>=1.0'"
     )
     sys.exit(1)
+
+from mcp_server.telemetry import init_telemetry, instrument
 
 # ---- 数据访问原语层（14 个细粒度工具）----
 from mcp_server.mcp_primitives import (
@@ -120,15 +121,26 @@ _PRIMITIVES = [
 
 
 def _register_primitive_tool(name: str, description: str, handler_fn):
-    """将原语函数注册为 MCP tool，并自动包一层 OTel Span。"""
+    """将原语函数注册为 MCP tool，并自动包一层 OTel Span。
+
+    关键：用 functools.wraps 继承 handler_fn 的真实签名，使 FastMCP 生成
+    正确的 inputSchema（如 query_text / top_k / ns），而不是把参数错误地
+    包进一个名为 `kwargs` 的字段（这会导致 worker 端调用时参数无法透传）。
+    """
     @instrument(name=f"mcp.primitive.{name}")
-    def tool_handler(**kwargs: Any) -> str:
+    @functools.wraps(handler_fn)
+    def tool_handler(*args: Any, **kwargs: Any) -> str:
         try:
-            result = handler_fn(**kwargs)
+            result = handler_fn(*args, **kwargs)
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             logger.exception("MCP primitive %s failed", name)
             return json.dumps({"status": "error", "reason": str(e)})
+
+    # functools.wraps 会继承 handler_fn 的返回注解（如 -> Dict[str, Any]），
+    # 这会让 FastMCP 据此生成 outputSchema 并把返回值当作 dict 校验，
+    # 与 tool_handler 实际返回的 JSON 字符串冲突。清除返回注解，保留参数签名。
+    tool_handler.__annotations__.pop("return", None)
 
     tool_handler.__name__ = name
     tool_handler.__doc__ = description
@@ -137,23 +149,41 @@ def _register_primitive_tool(name: str, description: str, handler_fn):
 
 
 def _register_skill_tool(skill_name: str):
-    """将 composed_tools.py 中的组合工具注册为 MCP tool，并自动包一层 OTel Span。"""
+    """将 composed_tools.py 中的组合工具注册为 MCP tool，并自动包一层 OTel Span。
+
+    组合工具的 handler 统一签名为 `payload: dict`，因此这里用 functools.wraps
+    继承 handler 的真实签名，使 FastMCP 生成 `{payload: {...}}` 的 inputSchema，
+    而非把参数错误地包进 `kwargs` 字段（双重嵌套会导致 worker 端参数无法透传）。
+    """
+    skill_def = get_skill(skill_name)
+    if skill_def is None:
+        return
+
+    handler_fn = skill_def.handler
+
     @instrument(name=f"mcp.skill.{skill_name}")
-    def tool_handler(**kwargs: Any) -> str:
-        skill = get_skill(skill_name)
-        if not skill:
-            return json.dumps({"status": "error", "reason": f"unknown skill: {skill_name}"})
+    @functools.wraps(handler_fn)
+    def tool_handler(*args: Any, **kwargs: Any) -> str:
         try:
-            result = skill.handler(kwargs)
+            # 兼容两种调用形态：位置参数 dict，或具名 payload
+            if args and isinstance(args[0], dict) and not kwargs:
+                payload = args[0]
+            elif kwargs.get("payload") is not None and len(kwargs) == 1:
+                payload = kwargs["payload"]
+            else:
+                payload = kwargs
+            result = handler_fn(payload)
             return json.dumps(result, ensure_ascii=False)
         except Exception as e:
             logger.exception("MCP skill tool %s failed", skill_name)
             return json.dumps({"status": "error", "reason": str(e)})
 
-    skill_def = get_skill(skill_name)
-    desc = f"[{skill_def.owner_role}] {skill_def.description}" if skill_def else skill_name
+    # 清除 handler 的返回注解（-> dict），避免 FastMCP 生成 outputSchema 校验
+    tool_handler.__annotations__.pop("return", None)
+
     tool_handler.__name__ = skill_name
-    tool_handler.__doc__ = desc
+    tool_handler.__doc__ = skill_def.description
+    desc = f"[{skill_def.owner_role}] {skill_def.description}"
     mcp.tool(name=skill_name, description=desc)(tool_handler)
 
 

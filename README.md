@@ -1,80 +1,157 @@
-# Daedalus
+<div align="center">
+  <img src="asset/logo.png" alt="Daedalus Logo" width="200"/>
+  <h1>Daedalus</h1>
+  <p><strong>An autonomous software company, built from agent teams.</strong></p>
+  <p>From issue to resolution — architected, coded, tested, and shipped by AI agents working as one organization.</p>
 
-基于 [AgentTeams (HiClaw)](https://hiclaw.io/) 的多 Agent 协同研发系统。命名源自希腊神话中的天才工匠 Daedalus——他打造了自主行走的青铜巨人 Talos，正如本系统的 Agent 团队自动协作完成缺陷修复。
+  <p>
+    <a href="https://github.com/agentscope-ai/AgentTeams"><img src="https://img.shields.io/badge/Orchestration-AgentTeams-blueviolet" alt="Orchestration"/></a>
+    <img src="https://img.shields.io/badge/Runtime-OpenClaw%20%7C%20QwenPaw%20%7C%20Hermes-blue" alt="Runtime"/>
+    <img src="https://img.shields.io/badge/Benchmark-SWE--bench-green" alt="SWE-bench"/>
+    <img src="https://img.shields.io/badge/Status-Production--oriented-orange" alt="Status"/>
+    <img src="https://img.shields.io/badge/License-Apache--2.0-lightgrey" alt="License"/>
+  </p>
+</div>
 
-## 目录结构
+---
 
+## Why Daedalus?
+
+In Greek mythology, **Daedalus** was the master craftsman — architect of the Labyrinth, maker of wings. He didn't just build things; he built *systems that solved impossible problems*.
+
+Daedalus brings that spirit to software engineering. It is not a coding assistant, and not a demo. It is a **production-oriented, multi-agent organization** that mirrors the structure of a real software company: a team of specialized agents — each with a defined role, clear decision boundaries, and auditable traces — collaborating to autonomously resolve real development issues.
+
+Today's Daedalus runs a closed-loop defect-resolution team. Tomorrow, it grows into the full company: design, development, testing, operations, and continuous integration — the entire software lifecycle, end to end.
+
+## How It Works
+
+An issue enters. A resolved, tested, verified patch exits. Everything in between is handled by the team:
+
+```mermaid
+graph LR
+    A[Issue Report] --> M[Manager<br/>Team Lead]
+    M --> AN[Analyzer<br/>Root Cause]
+    AN --> F[Fixer<br/>Programmer]
+    F --> T[Tester<br/>Validation]
+    T --> E[Evaluator<br/>Quality Gate]
+    E -->|Pass| R[Resolved]
+    E -->|Fail| F
+    E -->|Blocked| H[Human<br/>Escalation]
 ```
-├── deploy/           # AgentTeams 部署脚本、Worker 角色 YAML、Skills 打包、资源模板
-├── mcp_server/        # MCP Server（入口 server.py + 14 原语 + 组合工具 + 数据层 db/embed/code）
-├── docs/             # 比赛材料、架构设计与交付文档
-├── scripts/          # SWE-bench 自动化测试脚本
-├── results/          # 测试结果输出
-├── secrets/          # SSH 私钥（已被 .gitignore 忽略）
-└── Makefile          # 常用命令入口
-```
 
-## 快速开始
+Each agent runs in its own Docker container, coordinates through the AgentTeams orchestration layer, and shares artifacts through a common workspace. Every step leaves an execution trace — auditable, replayable, and accountable.
 
-### 首次搭建
+## The Team
+
+| Role | Responsibility |
+|------|----------------|
+| **Manager** | Team lead. Receives the issue, clones the target repository, decomposes the task, routes work, and owns the final outcome. |
+| **Analyzer** | Diagnoses root cause using the knowledge graph, semantic code search, and dependency analysis. |
+| **Fixer** | The programmer. Writes the patch with full codebase context — dependency graphs, historical fixes, architectural constraints. |
+| **Tester** | Writes and runs tests against the fix. No patch advances without evidence. |
+| **Evaluator** | The quality gate. Reviews the complete work product and decides: ship it, send it back, or escalate to a human. |
+
+New roles (architect, designer, SRE, release manager) plug into the same declarative YAML templates — the org chart is configuration, not code.
+
+## Architecture
+
+| Layer | Technology |
+|-------|-----------|
+| **Agent Orchestration** | [AgentTeams (Hiclaw)](https://github.com/agentscope-ai/AgentTeams) — declarative Worker / Team / Manager / Human resources |
+| **Agent Runtime** | OpenClaw / QwenPaw / Hermes (pluggable) |
+| **Execution Environment** | Docker — every agent isolated in its own container |
+| **Vector Database** | PostgreSQL + pgvector — semantic & hybrid code search |
+| **Knowledge Graph** | Neo4j  — code dependency & engineering knowledge |
+| **State & Cache** | Redis — file-hash cache for commit status monitoring |
+| **Shared Storage** | MinIO — artifact exchange between agents |
+| **Skill Protocol** | MCP (Model Context Protocol) — domain skills served to every worker |
+
+## Quick Start
+
+### Prerequisites
+
+| Requirement | Details |
+|-------------|---------|
+| **Docker Desktop** | Each agent role runs in its own Docker container. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) before proceeding. |
+| **Memory** | At least **32 GB RAM** for local deployment — the full stack (agents, PostgreSQL, Neo4j, Redis, MinIO) is memory-intensive. |
+| **Disk** | ~50 GB free for images, vectors, and knowledge-graph data. |
+
+### Local Deployment
+
+For running everything on your own machine, no remote server or SSH key is needed.
+
+First-time setup:
 
 ```bash
-./deploy/scripts/setup.sh <服务器IP> [PEM路径]
+./deploy/scripts/setup.sh
 ```
 
-### 日常启动
+Daily operation — bring up the entire company with one command:
 
 ```bash
-./deploy/scripts/start.sh [服务器IP] [PEM路径]
-./deploy/scripts/start.sh stop    # 停止全部
+./deploy/scripts/start.sh
+./deploy/scripts/stop.sh    # shut everything down
 ```
 
-### 手动启动领域技能服务
+### Remote Server Deployment
+
+When deploying to a remote server, pass the server IP and SSH key path:
 
 ```bash
-make run-domain-skills    # MCP Server 监听 :8090
+./deploy/scripts/setup.sh <server-ip> [pem-path]
+./deploy/scripts/start.sh <server-ip> [pem-path]
+./deploy/scripts/start.sh <server-ip> [pem-path] stop    # shut everything down
 ```
 
-## 架构概要
+## Evaluation
 
-系统分为三层：
+There are currently two ways to verify the agent team end-to-end:
 
-1. **控制面**（AgentTeams Manager）— 任务分发、多 Agent 协作编排、人工介入
-2. **运行面**（Worker Runtime）— 5 个 Worker 角色：Manager / Analyzer / Fixer / Tester / Evaluator
-3. **能力面**（Domain Skills）— MCP Server 暴露数据库驱动的智能技能（语义搜索、图谱查询、影响面分析等），Worker 通过 MCP 协议直连
+**1. SWE-Bench automated runner**
 
-Worker 间通过 MinIO 共享存储交换文件（仓库拉取、产物传递），文件操作与测试执行在 Worker 容器沙箱内原生处理。
+`scripts/swe_bench_runner.py` drives the full pipeline against real SWE-Bench cases (pallets/flask). It submits issues through the AgentTeams flow (Analyzer → Fixer → Tester → Evaluator), collects patches, and validates them with the official SWE-Bench test harness.
 
-## 相关文档
+```bash
+# Full pipeline: index → submit → wait → verify
+python scripts/swe_bench_runner.py
 
-- **架构设计**：`docs/03_新初赛提交/方案设计.md`
-- **Agent 清单**：`docs/03_新初赛提交/AgentIdentity清单.md`
-- **Skill 清单**：`docs/03_新初赛提交/Skill清单.md`
-- **部署详情**：`deploy/README.md`
-- **MCP Server 说明**：`mcp_server/` 目录
-- **详细设计**：`docs/02_详细设计/`
+# List available Flask instances
+python scripts/swe_bench_runner.py --list
 
-## TODO — 实现对齐设计
+# Dry run (plan only, no actions)
+python scripts/swe_bench_runner.py --dry-run
+```
 
-以下内容记录了当前实现与 `docs/03_新初赛提交/方案设计.md`（v2.2）之间的主要偏差，需逐步修正以设计为准。条目按优先级排列。
+**2. AgentTeams chat room**
 
-> 已完成项（已从本清单移除）：Skill 分层架构（三层模型）、Skills 打包体系（`deploy/packages/rd-defect-skills/` + SemVer）、6 prompt-only + 9 with-scripts Skills 结构、Skill 命名统一（`knowledge_miner` → `knowledge-extraction`）、`result-judge` 归属（转 prompt-only）、`domain_skills/` 目录收归 `mcp_server/`、经验沉淀闭环（`lessons` 表 + `lesson-lookup`/`knowledge-extraction` 落地 + MERGE/SIMILAR/NEW 去重合并）、全链路监控（AgentLoop 控制台接入凭证已配置 + MCP Server 层 OTel 手动埋点已实现 + `setup-agentloop.sh` 一键接入脚本）。
+Open the AgentTeams chat UI and send a task directly to the **Manager** agent. The Manager will decompose the issue, route work to the team, and drive the full resolution loop interactively. This is the fastest way to test a specific bug or feature request.
 
-### P1 — 中优先级（重要功能缺失）
+## Repository Layout
 
-- **[灰度发布] 整个 §4 未实现**
-  - 偏差：设计 §4 定义 Manager 生成 `release_plan.json`、进入 `awaiting_release` 状态、事件驱动唤醒、canary 超时哨兵（24h TTL）、回归闭环（`regression_cycle_count`，上限 3 次）。当前均不存在。
-  - 建议：① 在 Manager 调度技能（`pipeline-router` Skill）中新增 `release_plan` 生成逻辑；② 扩展状态机 `_PIPELINE`，加入 `awaiting_release` → `confirming` → `resolved`/`analyzing` 分支；③ 在 `pipeline-router/scripts/task_router.py`、`state_manager.py` 中实现超时哨兵。
+```
+deploy/          AgentTeams installers, worker/team templates, env samples, ops scripts
+...
+```
 
-- **[状态机] 缺少 `received` 和 `awaiting_release` 阶段**
-  - 偏差：设计 §2.2 状态机为 `received → analyzing → fixing → testing → evaluating → awaiting_release → resolved / escalated`，当前代码 `_PIPELINE` 仅含 `analyzing → fixing → testing → evaluating` 四阶段。
-  - 建议：在 `composed_tools.py` 与 `pipeline-router/scripts/task_router.py` 的 `_PIPELINE` 中补全 `received` 和 `awaiting_release` 状态，并在 `task_router.py`/`state_manager.py` 中实现对应的状态迁移逻辑。
+## Roadmap
 
-- **[产出物] `release_plan.json` 和 `confirmation_report.json` 缺失**
-  - 偏差：设计 §2.4 定义 6 个核心产物，其中 `release_plan.json`（Manager 产出）和 `confirmation_report.json`（外部 CI/CD 产出）未在代码中生成或消费。
-  - 建议：在 Manager 流程中新增生成 `release_plan.json`（含 `canary_scope`、`risk_level`、`rollback_point` 等字段）并写入 MinIO 的步骤；预留 `confirmation_report.json` 的消费接口。
+Daedalus is production-oriented, and the roadmap reflects that:
 
-## 参考资料
+- **Jira integration** — a listener service that watches a Jira project and routes incoming issues directly to the agent team, closing the loop from ticket creation to resolved patch
+- **More roles, full lifecycle** — expand from defect resolution to the complete software company: design → development → testing → operations → CI/CD
+- **Engineering memory** — post-mortems and a living R&D knowledge base, so the team learns from every resolved issue instead of starting from zero
+- **Progressive delivery** — canary release with automated result confirmation
+- **Full-link observability** — AgentLoop integration for end-to-end agent monitoring
+- **Skill engineering** — versioned, lifecycle-managed skill platform
 
-- AgentTeams (HiClaw)：https://hiclaw.io/
-- AgentTeams 开源仓库：https://github.com/agentscope-ai/AgentTeams
+## Acknowledgments
+
+- [AgentTeams (Hiclaw)](https://hiclaw.io/) — the agent orchestration foundation
+- [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) — reference implementation
+engineering can be
+
+---
+
+<div align="center">
+  <sub>Daedalus — the craftsman never sleeps.</sub>
+</div>

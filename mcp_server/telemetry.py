@@ -64,14 +64,26 @@ def init_telemetry(service_name: Optional[str] = None) -> None:
     if not endpoint:
         logger.warning("MCP_OTEL_ENABLED=true but no OTLP endpoint found; telemetry disabled")
         return
+    # OTLPSpanExporter 显式传 endpoint 时不自动 append /v1/traces，
+    # 而阿里云 SLS 接收端点是 .../apm/trace/opentelemetry/v1/traces。
+    # 这里补全路径，否则上报 404。
+    if not endpoint.endswith("/v1/traces"):
+        endpoint = endpoint.rstrip("/") + "/v1/traces"
 
     resource = Resource(attributes={SERVICE_NAME: service_name})
     provider = TracerProvider(resource=resource)
 
     headers = {}
+    # 阿里云 SLS / AgentLoop 需要三个认证头，缺一不可（否则上报返回 404/403）
     license_key = os.getenv("AGENTLOOP_LICENSE_KEY", "")
+    project = os.getenv("AGENTLOOP_PROJECT", "")
+    workspace = os.getenv("AGENTLOOP_WORKSPACE", "")
     if license_key:
         headers["x-arms-license-key"] = license_key
+    if project:
+        headers["x-arms-project"] = project
+    if workspace:
+        headers["x-cms-workspace"] = workspace
 
     # 允许通过 OTEL_EXPORTER_OTLP_HEADERS 覆盖或补充 headers
     extra_headers = os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "")
@@ -81,6 +93,7 @@ def init_telemetry(service_name: Optional[str] = None) -> None:
                 k, v = part.split("=", 1)
                 headers[k.strip()] = v.strip()
 
+    # 注意：OTLPSpanExporter 会自动 append /v1/traces，故 endpoint 传基础路径即可。
     exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)

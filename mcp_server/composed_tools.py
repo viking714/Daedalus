@@ -23,7 +23,8 @@
 
 角色架构（对齐补充设计文档 v1.2 / 方案设计 v2.2）：
 - Manager（Orchestrator）：task_router / state_manager / handoff_manager
-- Analyzer：semantic_search / kg_query / module_lookup / repo_indexer / hybrid_search / context_packer / root_cause_analyzer
+- Analyzer：semantic_search / kg_query / module_lookup / repo_indexer / context_packer / root_cause_analyzer
+  （注：hybrid_search 为 mcp_primitives 层的共享服务，由 semantic_search 复用，不在此重复注册）
 - Fixer：repair_planner / risk_gate
 - Tester：（result_judge 已转为 prompt-only Skill，由 Worker runtime 直接执行，不在此注册）
 - Evaluator：dep_graph_analyzer / contract_checker / knowledge_extraction
@@ -48,6 +49,7 @@ from mcp_server.db.schema import ensure_all
 from mcp_server.db.lessons import LessonsStore
 from mcp_server.embed.embeddings import EmbeddingService
 from mcp_server.code.ast_parser import AstParser
+from mcp_server.mcp_primitives import hybrid_search
 
 # --------------------------------------------------------------------------- #
 # Registry（注册表模式）
@@ -95,13 +97,23 @@ MAX_FILES = 5
 TASK_TIMEOUT_MIN = 30
 TOKEN_BUDGET = 100000
 
-# 流水线阶段 -> 负责 Agent（对齐补充设计文档 v1.2 四角色架构）
+# 灰度发布阈值（对齐方案设计 v2.2 §4.5 / §4.6）
+REGRESSION_CYCLE_MAX = 3      # 回归闭环上限，超限转 escalated
+CANARY_TIMEOUT_MIN = 24 * 60  # awaiting_release 超时哨兵 TTL（默认 24h）
+
+# 流水线阶段 -> 负责 Agent（对齐方案设计 v2.2 §2.2 完整状态机）
+# received → analyzing → fixing → testing → evaluating → awaiting_release → resolved / escalated
 _PIPELINE: List[Tuple[str, str]] = [
+    ("received", "manager"),
     ("analyzing", "analyzer"),
     ("fixing", "fixer"),
     ("testing", "tester"),
     ("evaluating", "evaluator"),
+    ("awaiting_release", "manager"),
 ]
+
+# 终态集合（任务仅在这些状态真正结束）
+_TERMINAL_STAGES = {"resolved", "escalated"}
 
 
 # --------------------------------------------------------------------------- #
@@ -117,53 +129,37 @@ def _rand(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-def reciprocal_rank_fusion(ranked_lists: List[list], k: int = 60) -> List[dict]:
-    """Reciprocal Rank Fusion：多路召回按排名融合（标准做法，无需训练）。
-
-    各路召回只需给出 [{chunk_id, score?, ...}]，同 chunk_id 跨路累加 1/(k+rank+1)。
-    优先保留字段最丰富的元信息（含 content/path 的那一路）。
-    """
-    scores: Dict[str, float] = {}
-    meta: Dict[str, dict] = {}
-    for rl in ranked_lists:
-        for rank, item in enumerate(rl):
-            cid = item["chunk_id"]
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
-            if cid not in meta or len(item) > len(meta[cid]):
-                meta[cid] = item
-    fused = sorted(scores.items(), key=lambda x: -x[1])
-    out = []
-    for cid, s in fused:
-        item = {kk: vv for kk, vv in meta[cid].items() if kk != "chunk_id"}
-        item["chunk_id"] = cid
-        item["score"] = round(s, 4)
-        out.append(item)
-    return out
-
-
 # --------------------------------------------------------------------------- #
 # Orchestrator 主控技能（task_router / state_manager / handoff_manager）
 # --------------------------------------------------------------------------- #
 
 
-@register("task_router", "Manager", "根据任务与当前阶段路由；达最大轮次则转人工移交")
+@register("task_router", "Manager", "根据任务与当前阶段路由；达最大轮次转人工移交，awaiting_release 后由灰度事件驱动")
 def skill_task_router(payload: dict) -> dict:
     src = payload.get("source") or {}
     current_stage = payload.get("current_stage") or (src.get("stage") if isinstance(src, dict) else None)
     round_ = payload.get("round")
 
+    # 达最大轮次 → 人工介入（终态 escalated）
     if round_ is not None and round_ >= MAX_ROUND:
-        return {"next_agent": None, "next_stage": "handoff", "reason": f"round {round_} >= max_round {MAX_ROUND}"}
+        return {"next_agent": None, "next_stage": "escalated", "reason": f"round {round_} >= max_round {MAX_ROUND}"}
 
-    if current_stage and current_stage != "received":
-        idx = next((i for i, (s, _) in enumerate(_PIPELINE) if s == current_stage), None)
-        if idx is not None and idx + 1 < len(_PIPELINE):
-            nxt_stage, nxt_agent = _PIPELINE[idx + 1]
-            return {"next_agent": nxt_agent, "next_stage": nxt_stage, "reason": "pipeline advance"}
-        return {"next_agent": None, "next_stage": "done", "reason": "pipeline complete"}
+    # 终态不推进
+    if current_stage in _TERMINAL_STAGES:
+        return {"next_agent": None, "next_stage": current_stage, "reason": "terminal stage"}
 
-    # 默认入口：从 analyzing 阶段开始
-    return {"next_agent": "analyzer", "next_stage": "analyzing", "reason": "default entry"}
+    # 入口：received / 无状态 → analyzing
+    if not current_stage or current_stage == "received":
+        return {"next_agent": "analyzer", "next_stage": "analyzing", "reason": "entry from received"}
+
+    # 常规流水线推进
+    idx = next((i for i, (s, _) in enumerate(_PIPELINE) if s == current_stage), None)
+    if idx is not None and idx + 1 < len(_PIPELINE):
+        nxt_stage, nxt_agent = _PIPELINE[idx + 1]
+        return {"next_agent": nxt_agent, "next_stage": nxt_stage, "reason": "pipeline advance"}
+
+    # awaiting_release 是流水线最后一段，之后由灰度结果事件驱动（release_decision），不自动推进
+    return {"next_agent": None, "next_stage": "awaiting_release", "reason": "awaiting canary result; release decision required"}
 
 
 class _StateStore:
@@ -203,7 +199,7 @@ class _StateStore:
 _STATE_STORE = _StateStore()
 
 
-@register("state_manager", "Manager", "持久化 TaskState 迁移，并强制闭环阈值（轮次/文件数/Token/超时）")
+@register("state_manager", "Manager", "持久化 TaskState 迁移，并强制闭环阈值（轮次/文件数/Token/超时/回归次数）")
 def skill_state_manager(payload: dict) -> dict:
     task_id = payload.get("task_id")
     if not task_id:
@@ -212,7 +208,13 @@ def skill_state_manager(payload: dict) -> dict:
     # —— 闭环阈值闸门 ——
     r = payload.get("round")
     if r is not None and r > MAX_ROUND:
-        return {"accepted": False, "decision": "handoff", "reason": f"round {r} exceeds max_round={MAX_ROUND}"}
+        return {"accepted": False, "decision": "escalated", "reason": f"round {r} exceeds max_round={MAX_ROUND}"}
+
+    # 回归闭环闸门：regression_cycle_count 超限强制 escalated
+    rc = payload.get("regression_cycle_count")
+    if rc is not None and rc > REGRESSION_CYCLE_MAX:
+        return {"accepted": False, "decision": "escalated", "reason": f"regression cycle {rc} exceeds max={REGRESSION_CYCLE_MAX}"}
+
     files = payload.get("modified_files_count")
     if files is not None and files > MAX_FILES:
         return {"accepted": False, "reason": f"modified files {files} exceeds budget {MAX_FILES}"}
@@ -228,14 +230,22 @@ def skill_state_manager(payload: dict) -> dict:
     if st and st.get("started_at"):
         started = datetime.fromisoformat(st["started_at"])
         if (datetime.now(timezone.utc) - started).total_seconds() > TASK_TIMEOUT_MIN * 60:
-            return {"accepted": False, "decision": "handoff", "reason": "task timeout"}
+            return {"accepted": False, "decision": "escalated", "reason": "task timeout"}
     if not st:
         extra["started_at"] = _now_iso()
+
+    to_stage = payload.get("to_stage") or payload.get("stage")
+    # awaiting_release 记录进入时间，供 canary_watchdog 判定 TTL
+    if to_stage == "awaiting_release":
+        extra["release_entered_at"] = _now_iso()
+    # 回归次数回灌（由 release_decision 决策回滚时递增并携带）
+    if rc is not None:
+        extra["regression_cycle_count"] = rc
 
     result = _STATE_STORE.transition(
         task_id=task_id,
         from_stage=payload.get("from_stage"),
-        to_stage=payload.get("to_stage") or payload.get("stage"),
+        to_stage=to_stage,
         owner_agent=payload.get("owner_agent") or payload.get("agent") or "manager",
         reason=payload.get("reason") or "",
         extra=extra,
@@ -261,7 +271,141 @@ def skill_handoff_manager(payload: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Retriever 检索技能（repo_indexer / hybrid_search / context_packer）
+# Release 灰度发布技能（release_plan_generator / release_decision / canary_watchdog）
+# 对齐方案设计 v2.2 §4：Manager 生成 release_plan.json → awaiting_release →
+# 事件唤醒读 confirmation_report.json → 关单 / 回滚 / escalated + 超时哨兵
+# --------------------------------------------------------------------------- #
+
+
+@register("release_plan_generator", "Manager", "生成灰度发布计划 release_plan.json（对齐方案设计 §4.2 意图声明）")
+def skill_release_plan_generator(payload: dict) -> dict:
+    """Evaluator 裁定通过后，Manager 生成 release_plan.json 作为灰度发布意图声明。
+
+    本组合工具返回结构化 dict，由 Worker 持久化为 release_plan.json 写入 MinIO。
+    关键字段（§4.2）：canary_scope / risk_level / rollback_point / promote_threshold。
+    注意：PR 描述禁用 closes/fixes 关键字，避免 merge 即自动关单（§4.4）。
+    """
+    task_id = payload.get("task_id")
+    if not task_id:
+        return {"status": "error", "reason": "task_id required"}
+
+    release_plan = {
+        "task_id": task_id,
+        "canary_scope": payload.get("canary_scope", "5% 流量 / region=default"),
+        "risk_level": payload.get("risk_level", "L2"),
+        "rollback_point": payload.get("rollback_point", f"git tag pre-fix-{task_id}"),
+        "approver": payload.get("approver", "human"),
+        "soak_window_min": int(payload.get("soak_window_min", 30)),
+        "promote_threshold": payload.get("promote_threshold", {"error_rate_max": 0.01}),
+        "pr_desc_note": "PR 描述禁用 closes/fixes 关键字，关单动作须由 Agent 显式执行",
+        "created_at": _now_iso(),
+        "status": "pending_approval",
+    }
+    return {
+        "status": "ok",
+        "release_plan": release_plan,
+        "next_stage": "awaiting_release",
+    }
+
+
+@register("release_decision", "Manager", "读取 confirmation_report.json 决策关单/回滚（对齐方案设计 §4.4/§4.5）")
+def skill_release_decision(payload: dict) -> dict:
+    """灰度结果确认闭环：消费 confirmation_report.json 决策。
+
+    canary OK   → resolved（调用 GitHub API 关单）
+    canary FAIL → 回归闭环（regression_cycle_count++，未超限回滚到 analyzing，
+                  超限 → escalated 人工介入）。回归不新建 Issue，复用同一 task_id。
+    """
+    task_id = payload.get("task_id")
+    if not task_id:
+        return {"status": "error", "reason": "task_id required"}
+
+    confirmation = payload.get("confirmation_report") or payload.get("confirmation") or {}
+    if isinstance(confirmation, dict):
+        canary_result = str(confirmation.get("result") or confirmation.get("canary_result") or "").lower()
+        canary_passed = confirmation.get("passed")
+    else:
+        canary_result = str(confirmation).lower()
+        canary_passed = None
+
+    if canary_passed is None:
+        passed = canary_result in ("ok", "pass", "passed", "success", "succeeded", "true")
+    else:
+        passed = bool(canary_passed)
+
+    regression_cycle = int(payload.get("regression_cycle_count", 0))
+
+    if passed:
+        return {
+            "decision": "resolved",
+            "action": "close_issue",
+            "next_stage": "resolved",
+            "reason": "canary OK; close issue",
+        }
+
+    # canary FAIL：回归闭环
+    regression_cycle += 1
+    if regression_cycle > REGRESSION_CYCLE_MAX:
+        return {
+            "decision": "escalated",
+            "action": "escalate_to_human",
+            "next_stage": "escalated",
+            "regression_cycle_count": regression_cycle,
+            "reason": f"canary FAIL and regression cycle {regression_cycle} exceeds max {REGRESSION_CYCLE_MAX}",
+        }
+
+    return {
+        "decision": "rollback",
+        "action": "feedback_to_analyzer",
+        "next_stage": "analyzing",
+        "regression_cycle_count": regression_cycle,
+        "feedback": confirmation if isinstance(confirmation, dict) else {"result": confirmation},
+        "reason": f"canary FAIL; rollback to analyzing (regression cycle {regression_cycle}/{REGRESSION_CYCLE_MAX})",
+    }
+
+
+@register("canary_watchdog", "Manager", "awaiting_release 超时哨兵（对齐方案设计 §4.6，默认 24h TTL）")
+def skill_canary_watchdog(payload: dict) -> dict:
+    """巡检 awaiting_release 是否超时（CI 静默失败 / webhook 丢失 / 人工忘 merge）。
+
+    超时未收到 canary 结果 → 标 escalated 并通知人工（Matrix @admin）。
+    """
+    task_id = payload.get("task_id")
+    if not task_id:
+        return {"status": "error", "reason": "task_id required"}
+
+    timeout_min = int(payload.get("canary_timeout_min", CANARY_TIMEOUT_MIN))
+    st = _STATE_STORE.get(task_id)
+    if not st:
+        return {"status": "error", "reason": f"unknown task: {task_id}"}
+
+    if st.get("stage") != "awaiting_release":
+        return {"status": "not_waiting", "stage": st.get("stage"), "reason": "not in awaiting_release"}
+
+    entered_at = st.get("release_entered_at") or st.get("timestamp")
+    if not entered_at:
+        return {"status": "waiting", "reason": "no release_entered_at; assume just entered"}
+
+    entered = datetime.fromisoformat(entered_at)
+    elapsed_min = (datetime.now(timezone.utc) - entered).total_seconds() / 60
+    if elapsed_min > timeout_min:
+        return {
+            "status": "escalated",
+            "action": "notify_human",
+            "next_stage": "escalated",
+            "reason": f"canary timeout: elapsed {elapsed_min:.0f}min > {timeout_min}min",
+        }
+
+    return {
+        "status": "waiting",
+        "elapsed_min": round(elapsed_min, 1),
+        "timeout_min": timeout_min,
+        "reason": "awaiting canary result",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Retriever 检索技能（repo_indexer / context_packer）
 # --------------------------------------------------------------------------- #
 
 
@@ -524,52 +668,6 @@ def skill_repo_indexer(payload: dict) -> dict:
             "new_chunks": len(new_chunks),
             "cache_hits": cache_hits,
             "edge_errors": edge_errors,
-        }
-    except DbUnavailable as e:
-        return {"status": "unavailable", "reason": str(e)}
-    except Exception as e:  # noqa: BLE001
-        return {"status": "error", "reason": str(e)}
-
-
-@register("hybrid_search", "Analyzer", "混合检索：向量+关键词两路 RRF 融合，再经知识图谱关系扩充（commit-aware 命名空间）")
-def skill_hybrid_search(payload: dict) -> dict:
-    query = payload.get("query", "")
-    top_k = int(payload.get("top_k", 5))
-    ns = payload.get("ns", "")
-    if not query:
-        return {"status": "error", "reason": "query required"}
-    try:
-        # 阶段一：两路混合召回（语义 + 关键词），RRF 融合定位「入口点」
-        emb = EmbeddingService()
-        qv = emb.embed([query])[0]
-        pg = PgVectorStore()
-        vec = pg.vector_search(qv, top_k * 2, ns=ns)
-        meili = MeiliStore()
-        kw = meili.keyword_search(query, top_k * 2, ns=ns)
-        fused = reciprocal_rank_fusion([vec, kw], k=60)
-        results = fused[:top_k]
-
-        # 阶段二：知识图谱扩充——以入口点为种子，沿 CALLS/IMPORTS 拉入结构相关块。
-        graph_expansion = []
-        try:
-            neo = Neo4jStore()
-            seed_ids = [r["chunk_id"] for r in results]
-            related = neo.expand_chunks(seed_ids, limit=top_k, ns=ns)
-            if related:
-                metas = {m["chunk_id"]: m for m in pg.fetch_by_ids([r["chunk_id"] for r in related], ns=ns)}
-                for r in related:
-                    meta = metas.get(r["chunk_id"])
-                    if meta:
-                        graph_expansion.append({**meta, "relation": r["relation"], "via": r["via"]})
-        except DbUnavailable:
-            pass
-
-        return {
-            "results": results,
-            "graph_expansion": graph_expansion,
-            "mode": "hybrid+graph",
-            "candidates": len(fused),
-            "ns": ns,
         }
     except DbUnavailable as e:
         return {"status": "unavailable", "reason": str(e)}
@@ -912,8 +1010,8 @@ def skill_semantic_search(payload: dict) -> dict:
     ns = payload.get("ns", "")
     if not query:
         return {"status": "error", "reason": "query required"}
-    # 复用 hybrid_search 的完整实现
-    result = skill_hybrid_search({"query": query, "top_k": top_k, "ns": ns})
+    # 复用 mcp_primitives.hybrid_search 共享服务（唯一实现，避免重复造轮子）
+    result = hybrid_search(query=query, top_k=top_k, ns=ns)
     if file_filter and result.get("results"):
         result["results"] = [r for r in result["results"] if r.get("path", "").startswith(file_filter)]
     # 转换为设计文档标准输出格式

@@ -8,7 +8,9 @@ mcp[cli]>=1.0
 psycopg2-binary>=2.9
 redis>=5.0
 meilisearch>=0.30
-neo4j>=5.0
+# 注意：必须用 neo4j-driver（5.x，import 名为 neo4j），
+# 不能写 neo4j（6.x 会与 neo4j-driver 在同一 neo4j/ 目录冲突）
+neo4j-driver>=5.0
 
 # 向量化与代码解析
 openai>=1.0

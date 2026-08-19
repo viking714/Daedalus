@@ -390,7 +390,7 @@ ensure_rd_defect_team() {
     docker exec hiclaw-controller hiclaw delete team rd-defect-team >/dev/null 2>&1 || true
     if docker exec hiclaw-controller hiclaw create team \
       --name rd-defect-team \
-      --leader-name manager \
+      --leader-name coordinator \
       --leader-model "${expected_model}" \
       --workers analyzer,fixer,tester,evaluator >/dev/null 2>&1; then
       ok "Team 已创建: rd-defect-team"
@@ -401,7 +401,7 @@ ensure_rd_defect_team() {
     ok "Team 已存在且成员完整: rd-defect-team"
   fi
 
-  docker exec hiclaw-controller hiclaw worker ensure-ready --name manager >/dev/null 2>&1 || true
+  docker exec hiclaw-controller hiclaw worker ensure-ready --name coordinator >/dev/null 2>&1 || true
 }
 
 sync_controller_resources() {
@@ -423,7 +423,7 @@ sync_controller_resources() {
     fi
   done
 
-  if controller_apply_file "${DEPLOY_DIR}/templates/default-manager.yaml" >/dev/null 2>&1; then
+  if controller_apply_file "${DEPLOY_DIR}/teams/default-manager.yaml" >/dev/null 2>&1; then
     ok "Manager 已注册/更新: default"
   else
     warn "Manager 注册失败: default"
@@ -577,6 +577,11 @@ if [[ -n "${SKILL_PID}" ]] && kill -0 "${SKILL_PID}" 2>/dev/null; then
 else
   # 加载 DB 环境变量
   set -a; source "${DB_ENV}"; set +a
+  # 加载 AgentLoop / OTel 环境变量（MCP_OTEL_ENABLED + AGENTLOOP_* 凭证）
+  # 否则 telemetry.py 的 init_telemetry 读不到开关，自动降级为 no-op，不上报 Span
+  if [[ -f "${AGENTTEAMS_ENV}" ]]; then
+    set -a; source "${AGENTTEAMS_ENV}"; set +a
+  fi
 
   cd "${REPO_ROOT}"
   nohup "${PROJECT_PYTHON}" mcp_server/server.py > /tmp/agentteams-skills.log 2>&1 &
@@ -636,6 +641,14 @@ if docker exec hiclaw-controller hiclaw status >/dev/null 2>&1; then
   # 唤醒所有 Worker
   bash "${SCRIPT_DIR}/agentteams-ctl.sh" agents start 2>/dev/null || true
   ok "Worker 已唤醒"
+
+  # 修复运行时配置（controller 重启会覆盖 worker 的 openclaw.json / SOUL.md，
+  # 且 Team Room 需手动重建）。失败不阻断，可稍后单独重跑该脚本。
+  if [[ -f "${SCRIPT_DIR}/fix-agentteams-runtime.sh" ]]; then
+    info "Step 5.5: 修复运行时配置（openclaw.json / SOUL.md / Team Room）..."
+    bash "${SCRIPT_DIR}/fix-agentteams-runtime.sh" || \
+      warn "运行时配置修复失败，请稍后手动执行: bash deploy/scripts/fix-agentteams-runtime.sh"
+  fi
 fi
 echo ""
 
