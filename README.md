@@ -33,6 +33,17 @@ An issue enters. A resolved, tested, verified patch exits. Everything in between
 
 Issues arrive through the team chat room or a Jira ticket listener. The Manager clones the target repository from GitHub, the team resolves the issue, and the result ships as a merge-ready pull request — today confirmed by a human reviewer before merge. Each agent runs in its own Docker container, coordinates through the AgentTeams orchestration layer, and shares artifacts through a common workspace. Every step leaves an execution trace — auditable, replayable, and accountable.
 
+| Layer | Technology |
+|-------|-----------|
+| **Agent Orchestration** | [AgentTeams (Hiclaw)](https://github.com/agentscope-ai/AgentTeams) — declarative Worker / Team / Manager / Human resources |
+| **Agent Runtime** | OpenClaw / QwenPaw / Hermes (pluggable) |
+| **Execution Environment** | Docker — every agent isolated in its own container |
+| **Vector Database** | PostgreSQL + pgvector — semantic & hybrid code search |
+| **Knowledge Graph** | Neo4j  — code dependency & engineering knowledge |
+| **State & Cache** | Redis — file-hash cache for commit status monitoring |
+| **Shared Storage** | MinIO — artifact exchange between agents |
+| **Skill Protocol** | MCP (Model Context Protocol) — domain skills served to every worker |
+
 ## The Team
 
 | Role | Responsibility |
@@ -44,19 +55,6 @@ Issues arrive through the team chat room or a Jira ticket listener. The Manager 
 | **Evaluator** | The quality gate. Reviews the complete work product and decides: ship it, send it back, or escalate to a human. |
 
 New roles (architect, designer, SRE, release manager) plug into the same declarative YAML templates — the org chart is configuration, not code.
-
-## Architecture
-
-| Layer | Technology |
-|-------|-----------|
-| **Agent Orchestration** | [AgentTeams (Hiclaw)](https://github.com/agentscope-ai/AgentTeams) — declarative Worker / Team / Manager / Human resources |
-| **Agent Runtime** | OpenClaw / QwenPaw / Hermes (pluggable) |
-| **Execution Environment** | Docker — every agent isolated in its own container |
-| **Vector Database** | PostgreSQL + pgvector — semantic & hybrid code search |
-| **Knowledge Graph** | Neo4j  — code dependency & engineering knowledge |
-| **State & Cache** | Redis — file-hash cache for commit status monitoring |
-| **Shared Storage** | MinIO — artifact exchange between agents |
-| **Skill Protocol** | MCP (Model Context Protocol) — domain skills served to every worker |
 
 ## Quick Start
 
