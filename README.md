@@ -29,7 +29,7 @@ An issue enters. A resolved, tested, verified patch exits. Everything in between
 
 <!-- Diagram source of truth: asset/how-it-works.mmd. Regenerate with: mmdc -i asset/how-it-works.mmd -o asset/how-it-works.png -b white -s 2 -->
 
-<img src="asset/how-it-works.png" alt="Daedalus end-to-end flow. Left: issue sources - human chat room and Jira ticket listener. Middle: the Daedalus agent team - Manager, Analyzer, Fixer, Tester, Evaluator - cloning and pushing code on GitHub. Right: delivery - a merge-ready pull request confirmed by human review; blocked cases escalate to a human." />
+<img src="asset/architecture.png" alt="Daedalus end-to-end flow. Left: issue sources - human chat room and Jira ticket listener. Middle: the Daedalus agent team - Manager, Analyzer, Fixer, Tester, Evaluator - cloning and pushing code on GitHub. Right: delivery - a merge-ready pull request confirmed by human review; blocked cases escalate to a human." />
 
 Issues arrive through the team chat room or a Jira ticket listener. The Manager clones the target repository from GitHub, the team resolves the issue, and the result ships as a merge-ready pull request — today confirmed by a human reviewer before merge. Each agent runs in its own Docker container, coordinates through the AgentTeams orchestration layer, and shares artifacts through a common workspace. Every step leaves an execution trace — auditable, replayable, and accountable.
 
