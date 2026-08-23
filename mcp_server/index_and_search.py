@@ -28,9 +28,12 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_HERE)
-_DB_ENV = os.path.join(_REPO_ROOT, "deploy", "db", ".env.db")
-if os.path.exists(_DB_ENV):
-    os.environ.setdefault("AGENTTEAMS_ENV_FILE", _DB_ENV)
+# 优先新布局（统一部署脚本生成的 deploy/db/.env），兼容旧名 .env.db
+for _candidate in (os.path.join(_REPO_ROOT, "deploy", "db", ".env"),
+                   os.path.join(_REPO_ROOT, "deploy", "db", ".env.db")):
+    if os.path.exists(_candidate):
+        os.environ.setdefault("AGENTTEAMS_ENV_FILE", _candidate)
+        break
 
 
 def _health():
@@ -89,7 +92,7 @@ def main() -> None:
         })
         print(f"  -> HTTP {st} {json.dumps(body, ensure_ascii=False)}")
         if body.get("status") in ("unavailable", "error"):
-            print("  索引失败，请检查隧道 / .env.db / 依赖；中止。")
+            print("  索引失败，请检查数据库栈（bash deploy/scripts/run.sh status）/ deploy/db/.env / 依赖；中止。")
             sys.exit(1)
 
     if args.query:

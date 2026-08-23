@@ -8,7 +8,8 @@ spec:
   model: deepseek-ai/DeepSeek-V4-Pro
   mcpServers:
     - name: daedalus-mcp-server
-      url: http://hiclaw-mcp-server:8092/mcp
+      # 占位符 __MCP_WORKER_HOST__/__MCP_PORT__ 由部署脚本按 config.env 渲染（改端口即全局生效）
+      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp
       transport: http
   env:
     - name: HICLAW_WORKSPACE_DIR

@@ -35,7 +35,7 @@
   },
   "mcp_server": {
     "name": "code-intelligence",
-    "endpoint": "http://host.docker.internal:8090/mcp",
+    "endpoint": "http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp",
     "transport": "http",
     "primitives": [
       "pgvector_search", "pgvector_fetch", "pgvector_upsert_chunk", "pgvector_delete",

@@ -66,31 +66,25 @@ New roles (architect, designer, SRE, release manager) plug into the same declara
 | **Memory** | At least **32 GB RAM** for local deployment — the full stack (agents, PostgreSQL, Neo4j, Redis, MinIO) is memory-intensive. |
 | **Disk** | ~50 GB free for images, vectors, and knowledge-graph data. |
 
-### Local Deployment
+### Single-Server Deployment
 
-For running everything on your own machine, no remote server or SSH key is needed.
+Everything (AgentTeams platform, databases, and the domain-skills MCP server) runs on one
+machine — your laptop or a single server. No remote orchestration or SSH tunnels needed;
+just run the scripts on the target machine.
 
 First-time setup:
 
 ```bash
-./deploy/scripts/setup.sh
+cp deploy/config.env.example deploy/config.env   # fill in API keys / admin password
+bash deploy/scripts/install.sh
 ```
 
 Daily operation — bring up the entire company with one command:
 
 ```bash
-./deploy/scripts/start.sh
-./deploy/scripts/stop.sh    # shut everything down
-```
-
-### Remote Server Deployment
-
-When deploying to a remote server, pass the server IP and SSH key path:
-
-```bash
-./deploy/scripts/setup.sh <server-ip> [pem-path]
-./deploy/scripts/start.sh <server-ip> [pem-path]
-./deploy/scripts/start.sh <server-ip> [pem-path] stop    # shut everything down
+bash deploy/scripts/run.sh start     # start DB stack + MCP server + platform
+bash deploy/scripts/run.sh stop      # shut everything down
+bash deploy/scripts/run.sh status    # deployment summary
 ```
 
 ## Evaluation

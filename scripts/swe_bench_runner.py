@@ -28,9 +28,9 @@
     python scripts/swe_bench_runner.py --dry-run
 
 前置条件:
-    1. 全部服务已启动: ./deploy/scripts/start.sh
+    1. 全部服务已启动: bash deploy/scripts/run.sh start
     2. pip install datasets requests
-    3. Matrix 配置自动从 deploy/install/agentteams.env 读取（HICLAW_ADMIN_PASSWORD）
+    3. Matrix 配置自动从 deploy/config.env 读取（AGENTTEAMS_ADMIN_PASSWORD）
        派单房间严格取自 controller 当前 teamRoomID（MATRIX_ROOM_ID 不一致时忽略并告警）
 """
 
@@ -60,9 +60,13 @@ SWE_BENCH_DATASET = "princeton-nlp/SWE-bench_Lite"
 # AgentTeams env 文件路径（自动查找）
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
-_AGENTTEAMS_ENV = os.path.join(_REPO_ROOT, "deploy", "install", "agentteams.env")
-_DB_ENV = os.path.join(_REPO_ROOT, "deploy", "db", ".env.db")
-_LOCAL_MANAGER_ENV = os.path.expanduser("~/hiclaw-manager.env")
+_AGENTTEAMS_ENV = os.path.join(_REPO_ROOT, "deploy", "config.env")
+# 优先新布局（统一部署脚本生成的 deploy/db/.env），兼容旧名 .env.db
+_DB_ENV = os.path.join(_REPO_ROOT, "deploy", "db", ".env")
+if not os.path.exists(_DB_ENV):
+    _DB_ENV = os.path.join(_REPO_ROOT, "deploy", "db", ".env.db")
+_LOCAL_MANAGER_ENV = os.path.expanduser("~/agentteams-manager.env")
+_LOCAL_MANAGER_ENV_LEGACY = os.path.expanduser("~/hiclaw-manager.env")
 _HF_DATASETS_CACHE = os.path.expanduser("~/.cache/huggingface/datasets")
 _DEFAULT_TUNNEL_HOST = os.getenv("AGENTTEAMS_DB_TUNNEL_HOST", "8.130.191.237")
 _DEFAULT_TUNNEL_USER = os.getenv("AGENTTEAMS_DB_TUNNEL_USER", "root")
@@ -79,7 +83,7 @@ if os.path.exists(_DB_ENV):
     os.environ.setdefault("AGENTTEAMS_ENV_FILE", _DB_ENV)
 
 def _load_agentteams_env():
-    """从 deploy/install/agentteams.env 加载 Matrix 配置。"""
+    """从 deploy/config.env（统一部署配置）加载 Matrix 配置。"""
     if os.path.exists(_AGENTTEAMS_ENV):
         with open(_AGENTTEAMS_ENV) as f:
             for line in f:
@@ -88,11 +92,16 @@ def _load_agentteams_env():
                     continue
                 if "=" in line:
                     key, _, val = line.partition("=")
-                    os.environ.setdefault(key.strip(), val.strip())
+                    # 空值不写入：config.env 中 DB 密码等字段为空占位（实际密码在 db/.env），
+                    # 写入空串会遮蔽后续加载的真值（setdefault 不会覆盖已存在键）
+                    if val.strip():
+                        os.environ.setdefault(key.strip(), val.strip())
 
 _load_agentteams_env()
-if os.path.exists(_LOCAL_MANAGER_ENV):
-    with open(_LOCAL_MANAGER_ENV) as f:
+for _mgr_env in (_LOCAL_MANAGER_ENV, _LOCAL_MANAGER_ENV_LEGACY):
+    if not os.path.exists(_mgr_env):
+        continue
+    with open(_mgr_env) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -101,15 +110,18 @@ if os.path.exists(_LOCAL_MANAGER_ENV):
                 key, _, val = line.partition("=")
                 os.environ.setdefault(key.strip(), val.strip())
 
-# Matrix 配置（优先从 agentteams.env 读取，环境变量可覆盖）
-_hiclaw_matrix_domain = os.getenv("HICLAW_MATRIX_DOMAIN", "matrix-local.hiclaw.io:18080")
+# Matrix 配置（优先从 config.env / agentteams-manager.env 读取，环境变量可覆盖；
+# 兼容旧 HICLAW_* 命名）
+_hiclaw_matrix_domain = os.getenv(
+    "AGENTTEAMS_MATRIX_DOMAIN",
+    os.getenv("HICLAW_MATRIX_DOMAIN", "matrix-local.hiclaw.io:18080"))
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", f"http://127.0.0.1:{_hiclaw_matrix_domain.split(':')[-1] if ':' in _hiclaw_matrix_domain else '18080'}")
-MATRIX_USER = os.getenv("MATRIX_USER", os.getenv("HICLAW_ADMIN_USER", "admin"))
-MATRIX_PASSWORD = os.getenv("MATRIX_PASSWORD", os.getenv("HICLAW_ADMIN_PASSWORD", ""))
+MATRIX_USER = os.getenv("MATRIX_USER", os.getenv("AGENTTEAMS_ADMIN_USER", os.getenv("HICLAW_ADMIN_USER", "admin")))
+MATRIX_PASSWORD = os.getenv("MATRIX_PASSWORD", os.getenv("AGENTTEAMS_ADMIN_PASSWORD", os.getenv("HICLAW_ADMIN_PASSWORD", "")))
 MATRIX_ROOM_ID = os.getenv("MATRIX_ROOM_ID", "")  # 仅作参考；与 controller teamRoomID 不一致时会被忽略
 MATRIX_TEAM_NAME = os.getenv("MATRIX_TEAM_NAME", "rd-defect-team")
 MATRIX_WORKSPACE_DIR = os.path.expandvars(
-    os.path.expanduser(os.getenv("HICLAW_WORKSPACE_DIR", os.path.expanduser("~/hiclaw-manager"))))
+    os.path.expanduser(os.getenv("AGENTTEAMS_WORKSPACE_DIR", os.getenv("HICLAW_WORKSPACE_DIR", os.path.expanduser("~/agentteams-manager")))))
 
 # AgentTeams v1.2.x 更名后的容器/CLI/MinIO 命名（环境变量可覆盖，兼容旧部署）：
 # 旧版为 hiclaw-controller/hiclaw CLI/hiclaw-storage 桶，v1.2.0 起全部改名。
@@ -515,10 +527,9 @@ def _probe_index_backend_ports() -> str:
 
     if unreachable:
         return (
-            "本地数据库端口不可达（可能是 SSH 隧道已断开）: "
+            "本地数据库端口不可达: "
             + ", ".join(unreachable)
-            + "。请先重新执行 ./deploy/scripts/start.sh 8.130.191.237 "
-            + "或 ./deploy/scripts/ecs-tunnel.sh"
+            + "。请先执行 bash deploy/scripts/run.sh start 拉起全部服务"
         )
     return ""
 
@@ -1914,7 +1925,7 @@ def run(args: argparse.Namespace):
     room_id = ""
     if not args.skip_submit and not args.index_only:
         if not MATRIX_PASSWORD:
-            log.error("请设置 MATRIX_PASSWORD 环境变量（或在 agentteams.env 中配置 HICLAW_ADMIN_PASSWORD）")
+            log.error("请设置 MATRIX_PASSWORD 环境变量（或在 deploy/config.env 中配置 AGENTTEAMS_ADMIN_PASSWORD）")
             return
         try:
             matrix = MatrixClient(MATRIX_HOMESERVER, MATRIX_USER, MATRIX_PASSWORD)
@@ -1938,7 +1949,7 @@ def run(args: argparse.Namespace):
         # 容器 running 不代表 agent 可用（休眠/失联时容器仍在）。
         if not MatrixClient.ensure_workers_ready():
             log.error(
-                "worker 未全部就绪，中止派单。可执行 ./deploy/scripts/agentteams-ctl.sh agents start 后重试"
+                "worker 未全部就绪，中止派单。 可执行 bash deploy/scripts/run.sh start 后重试"
             )
             return
 

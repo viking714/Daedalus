@@ -2,15 +2,16 @@
 
 来源（按优先级）：
 1. 环境变量；
-2. 若设置了 AGENTTEAMS_ENV_FILE，则先加载该文件（期望为 deploy/db/.env.db）。
+2. 若设置了 AGENTTEAMS_ENV_FILE，则先加载该文件（期望为统一部署脚本生成的
+   deploy/db/.env，兼容旧名 .env.db）。
 
-访问方式：经 SSH 隧道，所有库在本地回环 127.0.0.1（见 docker-compose.db.yml 端口绑定）。
-变量名与 .env.db 保持一致（POSTGRES_DB / NEO4J_PASSWORD / MEILI_MASTER_KEY / REDIS_PASSWORD）。
+访问方式：单机部署，所有库绑定本机回环 127.0.0.1（见 docker-compose.db.yml 端口绑定）。
+变量名与 db/.env 保持一致（POSTGRES_DB / NEO4J_PASSWORD / MEILI_MASTER_KEY / REDIS_PASSWORD）。
 """
 
 import os
 
-# .env.db 中提供的变量名
+# db/.env 中提供的变量名
 _ENV_DB_NAMES = (
     "POSTGRES_DB",
     "POSTGRES_USER",
@@ -29,7 +30,10 @@ def _load_env_file(path: str) -> None:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, val = line.split("=", 1)
-                os.environ.setdefault(key.strip(), val.strip())
+                # 覆盖空值：上游可能已把空占位（如 config.env 的 POSTGRES_PASSWORD=）写入 environ，
+                # 普通 setdefault 会被其遮蔽，导致连接时“no password supplied”
+                if not os.environ.get(key.strip()):
+                    os.environ[key.strip()] = val.strip()
     except FileNotFoundError:
         pass
 

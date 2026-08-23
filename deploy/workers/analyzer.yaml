@@ -13,22 +13,16 @@ spec:
   model: deepseek-ai/DeepSeek-V4-Pro
   mcpServers:
     - name: domain-skills
-      url: http://host.docker.internal:8090/mcp
+      # 占位符 __MCP_WORKER_HOST__/__MCP_PORT__ 由部署脚本按 config.env 渲染（改端口即全局生效）
+      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp
       transport: http
   env:
     - name: CODE_INTEL_MCP_URL
-      value: http://host.docker.internal:8090
+      value: http://__MCP_WORKER_HOST__:__MCP_PORT__
     - name: WORKER_ROLE
       value: Analyzer
-    # MinIO 共享存储——从 MinIO 拉取仓库，推送分析报告
-    - name: MINIO_ENDPOINT
-      value: ${MINIO_ENDPOINT:-http://minio:9000}
-    - name: MINIO_ACCESS_KEY
-      value: ${MINIO_ACCESS_KEY}
-    - name: MINIO_SECRET_KEY
-      value: ${MINIO_SECRET_KEY}
-    - name: MINIO_BUCKET
-      value: ${MINIO_BUCKET:-shared-tasks}
+    # MinIO 共享存储：平台内置 MinIO 经 controller 注入的 agentteams alias（mc CLI）访问，
+    # 无需在 worker yaml 配置凭据。
   # NOTE: spec.soul / spec.agents are the controller-generated source of truth
   # (-> SOUL.md / AGENTS.md). Previously declared under the invalid `spec.files.*`
   # field (ignored by the controller) and overwritten at runtime by

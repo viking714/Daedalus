@@ -1,320 +1,105 @@
-# AgentTeams 部署与资源目录
+# Daedalus / AgentTeams 统一部署目录
 
-本目录包含 AgentTeams 平台的完整部署配置：安装脚本、角色模板、运维脚本和数据库编排。
+单机部署：AgentTeams 平台 + 数据库栈 + 领域技能 MCP Server 全部安装在**同一台机器**
+（本地笔记本或一台服务器），本机优先，无需 SSH 隧道或远程编排。
 
 ## 目录结构
 
 ```
 deploy/
-├── install/          # 平台安装（环境变量 + 安装脚本）
-├── workers/          # Worker 角色定义（5 个角色 YAML）
-├── templates/        # Team / Manager / Human 资源模板
-├── scripts/          # 运维脚本（一键搭建、一键启动、平台启停、数据库、隧道）
-└── db/               # 数据库编排文件与连接配置
+├── config.env.example   # 唯一配置模板（复制为 config.env 填写；含密钥，已忽略）
+├── scripts/
+│   ├── install.sh       # 唯一安装脚本（一次性 / 可重跑升级）
+│   ├── run.sh           # 唯一运行脚本（start / stop / restart / status）
+│   └── lib/common.sh    # 共享库（配置加载、DB 栈、MCP、平台安装与资源注册）
+├── install/
+│   └── agentteams-install.sh  # vendored 官方安装器（v1.2.3，AGENTTEAMS_* 契约）
+├── workers/             # Worker 角色定义（5 个角色 YAML）
+├── teams/               # Team / Manager / Human 资源模板
+├── packages/            # 领域技能包源码与构建产物（rd-defect-skills）
+├── db/                  # 数据库栈编排（docker-compose.db.yml）
+└── archive/             # 已废弃的历史脚本（仅存档，勿使用）
 ```
 
 ## 快速开始
 
-### 首次搭建（仅运行一次）
-
 ```bash
-./scripts/setup.sh <服务器IP> [PEM路径]
+# 1. 生成配置并填写（至少填 AGENTTEAMS_LLM_API_KEY / AGENTTEAMS_ADMIN_PASSWORD / OPENAI_API_KEY）
+cp deploy/config.env.example deploy/config.env
+
+# 2. 一键安装（数据库栈 + MCP Server + AgentTeams 平台 + 技能包 + 资源注册）
+bash deploy/scripts/install.sh
+
+# 3. 日常启停
+bash deploy/scripts/run.sh start | stop | restart | status
 ```
 
-自动完成：检查依赖 → 生成配置（随机密码）→ 部署远程数据库 → 安装 AgentTeams → 注册 Worker → 初始化 schema。
-搭建完成后编辑两个配置文件填入 API Key 即可。
+`install.sh` 幂等可重跑：数据库密码首次随机生成并持久化到 `${RUNTIME_DIR}/db/.env`，
+后续运行复用；已安装平台则进入升级流程。
 
-### 日常启动（一条命令）
+## 组件说明
 
-```bash
-./scripts/start.sh [服务器IP] [PEM路径]
-```
+### AgentTeams 平台（scripts/lib/common.sh::install_agentteams）
 
-自动完成：启动远程数据库 → 建立 SSH 隧道 → 启动领域技能服务 → 启动 AgentTeams → 注册并唤醒 Worker。
-启动后即可直接开始工作。停止：`./scripts/start.sh stop`。
+- 版本固定为端到端验证过的 **v1.2.3**（`AGENTTEAMS_VERSION`，勿随意改）。
+- 安装器读取 `AGENTTEAMS_*` 环境变量（由 `config.env` 生成）；生成 `~/agentteams-manager.env`。
+- manager runtime 必须为 `qwenpaw`（`agentteams-manager-qwenpaw` 镜像），普通 worker 为 `openclaw`。
+- v1.2.x 命名：`agentteams-controller`（CLI `agt`）/ `agentteams-manager` /
+  `agentteams-worker-*` / MinIO alias `agentteams`（bucket `agentteams-storage`）。
 
-### 手动分步操作
+### 数据库栈（docker compose）
 
-如需逐步控制，可按以下顺序手动执行：
+| 容器 | 数据库 | 端口 | 用途 |
+|------|--------|------|------|
+| `at-postgres` | PostgreSQL + pgvector | 5432 | 主关系库 + 向量检索 |
+| `at-redis` | Redis | 6379 | 缓存 / 队列 / 会话 |
+| `at-meili` | Meilisearch | 7700 | 全文/关键词检索 |
+| `at-neo4j` | Neo4j | 7474 / 7687 | 代码知识图谱 |
 
-```bash
-# ① 安装 AgentTeams 平台
-cp install/agentteams.env.example install/agentteams.env   # 编辑填入 API Key 等
-bash install/install_agentteams.sh
+- 端口默认仅绑 `127.0.0.1`；每个库可声明 `XXX_EXTERNAL=1` 复用外部实例（跳过安装）。
+- Neo4j 依赖 `vm.max_map_count>=262144`，脚本自动设置（Linux sysctl / macOS 特权容器）。
 
-# ② 部署云端数据库
-cp db/.env.db.example db/.env.db                           # 编辑填入密码
-./scripts/deploy-db-ecs.sh
+### 领域技能 MCP Server
 
-# ③ 建立 SSH 隧道
-./scripts/ecs-tunnel.sh                                    # 前台常驻，Ctrl+C 断开
+- 直接运行仓库 `mcp_server/` 源码（端口 `MCP_PORT`，默认 8090，绑 `MCP_HOST`）。
+- 连接配置来自 `${RUNTIME_DIR}/db/.env`（安装脚本生成，DB 连接 + Embedding 一体）。
+- Worker 容器访问 MCP 的主机名：macOS 用 `host.docker.internal`；Linux 容器内不解析该名，
+  脚本自动回退为 Docker 网桥网关 IP（`resolve_linux_mcp_host`）。
+- Worker YAML 与技能包 manifest 中的 MCP 端点为 `__MCP_WORKER_HOST__:__MCP_PORT__`
+  占位符，部署/打包时渲染——改 `MCP_PORT` 即全局生效。
 
-# ④ 启动平台 + Worker
-./scripts/agentteams-ctl.sh all start
-```
-
----
-
-## 1. 平台安装 (install/)
-
-安装官方 AgentTeams（HiClaw）Embedded 环境，并对接本仓库的领域技能服务与 Worker 桥接层。
-
-### 前置条件
-
-- macOS / Linux，已安装 Docker Desktop
-- 可访问官方安装脚本（`https://higress.ai/hiclaw/install.sh`）
-- 已准备大模型 API Key
-
-### 安装步骤
-
-```bash
-cp install/agentteams.env.example install/agentteams.env
-```
-
-至少填写 `HICLAW_LLM_API_KEY` 和 `HICLAW_ADMIN_PASSWORD`，然后执行：
-
-```bash
-bash install/install_agentteams.sh
-```
-
-脚本读取 `agentteams.env`，下载官方安装脚本（已存在则跳过），以预置环境变量的方式调起安装流程。
-
-### 安装后的接入点
-
-| 组件 | 仓库路径 |
-|------|----------|
-| MCP Server（代码智能） | `mcp_server/`（含原语、组合工具、数据层） |
-| Worker 角色定义 | `deploy/workers/` |
-| 团队/管理/人类模板 | `deploy/teams/` |
-
----
-
-## 2. 角色与资源模板
-
-### 2.1 Worker 角色 (workers/)
-
-5 个角色 YAML 定义了每个 Worker 的模型、MCP 技能、MinIO 环境变量：
+### Worker 角色与资源注册
 
 | 角色 | 文件 | 职责 |
 |------|------|------|
-| Manager | `workers/manager.yaml` | 任务分发、状态管理、人工移交（Team Leader） |
+| Coordinator | `workers/coordinator.yaml` | Team Leader：流水线调度（analyze→fix→test→evaluate） |
 | Analyzer | `workers/analyzer.yaml` | 根因分析、代码检索、上下文构建 |
 | Fixer | `workers/fixer.yaml` | 修复规划、补丁生成、多文件编辑 |
 | Tester | `workers/tester.yaml` | 测试执行、结果裁定 |
 | Evaluator | `workers/evaluator.yaml` | 波及评估、签名检查、知识挖掘 |
 
-**Worker 工具分层：**
+`register_resources` 依次 `agt apply` workers/*.yaml 与 teams/*.yaml，并唤醒全部 Worker。
+MinIO 共享存储由平台内置（controller 注入 `agentteams` alias 的 mc CLI），worker yaml 不再声明凭据。
 
-| 操作类型 | 机制 | 示例 |
-|----------|------|------|
-| MinIO push/pull | Worker 原生 bash（`mc` CLI） | `mc cp repo.tar.gz minio:bucket/` |
-| 文件读写/编辑 | Worker 原生工具 | `cat`, `sed`, `echo` |
-| Git 操作 | Worker 原生 bash | `git diff`, `git apply` |
-| 运行测试 | Worker 原生 bash | `pytest`, `npm test` |
-| 语义搜索 | MCP skill（DB-backed） | `semantic_search` → domain_skills |
-| KG 查询 | MCP skill（DB-backed） | `kg_query` → Neo4j |
-| 影响面分析 | MCP skill（DB-backed） | `dep_graph_analyzer` → Neo4j |
+## 接入点速查（默认端口）
 
-**MinIO 共享存储：**
-
-每个 Worker YAML 通过 `env:` 声明 MinIO 连接信息，用于 Worker 间文件交换：
-
-```yaml
-env:
-  - name: MINIO_ENDPOINT
-    value: ${MINIO_ENDPOINT:-http://minio:9000}
-  - name: MINIO_ACCESS_KEY
-    value: ${MINIO_ACCESS_KEY}
-  - name: MINIO_SECRET_KEY
-    value: ${MINIO_SECRET_KEY}
-  - name: MINIO_BUCKET
-    value: ${MINIO_BUCKET:-shared-tasks}
-```
-
-数据流：Manager `git clone` → `tar czf` → `mc cp` 推送到 MinIO → Worker 拉取 → 本地工作 → 推送产物 → 下游 Worker 拉取。
-
-### 2.2 资源模板 (templates/)
-
-| 文件 | 用途 |
+| 服务 | 地址 |
 |------|------|
-| `templates/rd-defect-team.yaml` | Team 资源模板 — 定义团队组成与协作流程 |
-| `templates/default-manager.yaml` | Manager 资源模板 — 定义管理者配置 |
-| `templates/admin-human.yaml` | Human 资源模板 — 定义人类参与者配置 |
+| MCP Server | `http://127.0.0.1:8090/mcp` |
+| Higress 网关（Matrix） | `:18080` |
+| Higress Console | `:18001` |
+| Element Web | `:18088` |
+| PostgreSQL / Redis / Meilisearch / Neo4j | `5432 / 6379 / 7700 / 7687(Bolt)+7474(HTTP)` |
 
-### 2.3 架构分层
-
-在 AgentTeams 体系下，协同逻辑分为三层：
-
-1. **控制面**（Manager / HiClaw）— 任务分发、房间协作管理、人类介入
-2. **运行面**（Worker Runtime）— 解析 `soul` 并执行 Agent 逻辑
-   - `runtime: openclaw`：基于 OpenClaw，通用逻辑 Agent（所有 Worker 统一使用）
-3. **能力面**（Skills）— 由本仓库提供 MCP Server，Worker 通过 `mcpServers` 声明直接连接
-
----
-
-## 3. 运维脚本 (scripts/)
-
-### 3.1 一键搭建 — setup.sh（首次使用）
-
-从零搭建完整环境，只需一条命令：
+## 跑一个端到端任务
 
 ```bash
-./scripts/setup.sh <服务器IP> [PEM路径]
+python scripts/swe_bench_runner.py --issue-index 1
 ```
 
-自动完成：
-1. 检查前置依赖（Docker / Python3 / SSH），缺失时引导安装
-2. 从 `.example` 模板生成配置文件（自动填充随机密码）
-3. 在远程 ECS 部署数据库栈（PostgreSQL / Redis / Meilisearch / Neo4j）
-4. 安装 AgentTeams 平台（本地 Docker）
-5. 注册 Worker 角色与团队模板
-6. 初始化数据库 schema
-
-搭建完成后需手动编辑两个文件填入 API Key：
-- `deploy/db/.env.db` → `OPENAI_API_KEY`（Embedding 语义向量）
-- `deploy/install/agentteams.env` → `HICLAW_LLM_API_KEY`（LLM 调用）
-
-### 3.2 一键启动 — start.sh（日常使用）
-
-一条命令拉起全部环境，即可开始工作：
-
-```bash
-./scripts/start.sh [服务器IP] [PEM路径]
-```
-
-自动完成：
-1. 启动远程数据库（经 SSH）
-2. 建立 SSH 隧道（后台常驻）
-3. 启动领域技能服务（后台常驻，端口 8090）
-4. 启动 AgentTeams 平台
-5. 注册 Worker 角色并唤醒
-6. 健康检查 + 状态汇总
-
-停止全部：`./scripts/start.sh stop`
-
-### 3.3 平台启停 — agentteams-ctl.sh
-
-本地 AgentTeams 栈的优雅启停脚本，支持 Worker 和平台两层控制。
-
-```bash
-./scripts/agentteams-ctl.sh <agents|teams|all> <start|stop>
-```
-
-| 命令 | 作用 |
-|------|------|
-| `agents start` | 唤醒所有 Worker（`hiclaw worker ensure-ready`） |
-| `agents stop` | 休眠所有 Worker（保留状态、释放资源） |
-| `teams start` | 启动平台容器，等待 controller 就绪，打印控制台地址 |
-| `teams stop` | 先优雅休眠 Agent，再停平台容器（避免状态丢失） |
-| `all start` | 先起平台，再拉起所有 Worker（一键开机） |
-| `all stop` | 先休眠 Agent，再关平台（一键收工） |
-
-**说明：**
-- Worker 列表从 `hiclaw get workers -o json` 动态读取，无需硬编码角色名。
-- `teams stop` 先经 controller 优雅休眠 Agent 再停容器，避免直接停止造成状态丢失。
-- 平台启动后可访问：Higress Console `:18001` / Element Web `:18088` / AI 网关 `:18080`。
-
----
-
-## 4. 云端数据库栈
-
-数据库部署在阿里云 ECS（`8.130.191.237`，8G 规格），本地通过 SSH 隧道访问，DB 端口不暴露公网。
-
-### 4.1 数据库组件
-
-| 容器名 | 数据库 | 端口 | 用途 |
-|--------|--------|------|------|
-| `at-postgres` | PostgreSQL 15 + pgvector | 5432 | 主关系库 + 向量检索 |
-| `at-redis` | Redis 7 | 6379 | 缓存 / 队列 / 会话 |
-| `at-meili` | Meilisearch 1.5 | 7700 | 全文/语义混合检索 |
-| `at-neo4j` | Neo4j 5.18 | 7474 / 7687 | 代码依赖关系图 |
-
-### 4.2 文件说明
-
-| 文件 | 用途 |
-|------|------|
-| `db/docker-compose.db.yml` | 数据库栈编排（按 8G 内存配置，端口仅绑 `127.0.0.1`） |
-| `db/.env.db.example` | 密码/连接模板 |
-| `db/.env.db` | 实际密码（已被 gitignore 忽略，**勿提交**） |
-
-### 4.3 部署与运维脚本
-
-#### deploy-db-ecs.sh — 首次部署
-
-把 `docker-compose.db.yml` 与 `.env` 上传到 ECS，设好 Neo4j 前置参数，拉取镜像并启动。
-
-- **何时执行**：仅首次部署，或修改了 compose / 配置后。日常启停请用 `db-ctl.sh`。
-- **前置**：私钥 `secrets/ecs-ssh-key.pem` 可 SSH 登录 ECS；已填好 `db/.env.db`。
-
-```bash
-cp db/.env.db.example db/.env.db   # 填写密码
-./scripts/deploy-db-ecs.sh
-```
-
-#### ecs-tunnel.sh — SSH 隧道
-
-把云端 DB 端口映射到本地 `127.0.0.1`。隧道进程必须保持运行，本地程序才能连库。
-
-```bash
-./scripts/ecs-tunnel.sh            # 前台常驻，Ctrl+C 断开
-```
-
-端口映射：`5432` PostgreSQL / `6379` Redis / `7474` Neo4j HTTP / `7687` Neo4j Bolt / `7700` Meilisearch。
-
-> 想常驻可改为 `nohup ./scripts/ecs-tunnel.sh &`、用 `tmux`，或加 `autossh` 自动重连。
-
-#### db-ctl.sh — 数据库启停
-
-通过 SSH 控制 ECS 上数据库栈，本地不需要装 docker。
-
-```bash
-./scripts/db-ctl.sh <start|stop|restart|status>
-```
-
-| 命令 | 作用 |
-|------|------|
-| `start` | 拉起全部库（自动重设 `vm.max_map_count` 并持久化，解决 ECS 重启后 Neo4j 起不来的问题） |
-| `stop` | 优雅停止全部库（建议关机 ECS 前执行） |
-| `restart` | 先停后起（不停机重启） |
-| `status` | 列出 `at-*` 容器状态 |
-
-### 4.4 日常操作速查
-
-```bash
-# 首次部署（仅一次）
-cp db/.env.db.example db/.env.db
-./scripts/deploy-db-ecs.sh
-
-# 日常（ECS 已开机）
-./scripts/db-ctl.sh status                       # 查看状态
-./scripts/db-ctl.sh start                        # 开机后拉起
-./scripts/ecs-tunnel.sh                          # 另开终端建隧道，本地即可连库
-
-# 关机 ECS 前
-./scripts/db-ctl.sh stop                         # 优雅停库
-```
-
-### 4.5 本地连接地址（隧道建立后均为 `127.0.0.1`）
-
-| 服务 | 端口 | 备注 |
-|------|------|------|
-| PostgreSQL + pgvector | 5432 | db=`agentteams`，user=`agent` |
-| Redis | 6379 | |
-| Meilisearch | 7700 | master key 见 `db/.env.db` |
-| Neo4j (Bolt) | 7687 | user=`neo4j` |
-| Neo4j (HTTP) | 7474 | 浏览器打开查看 |
-
----
+runner 自动读取 `deploy/config.env` 与 `~/agentteams-manager.env`（admin 凭据、Matrix 域名）。
 
 ## 安全须知
 
-- ECS 安全组仅开放 `22` 端口。所有 DB 端口经隧道访问，**禁止对公网开放**。
-- 私钥 `secrets/ecs-ssh-key.pem` 和 `db/.env.db` 已加入 `.gitignore`，**切勿提交**。本地权限建议 `600`。
-- 实际部署时，YAML 中的字段应根据所安装的 AgentTeams 版本做最终校正。
-
-
-## 跑一个测试
-
-### 测试
-cd /path/to/Daedalus && python scripts/swe_bench_runner.py --issue-index 1
-
+- `config.env`、`db/.env`（含密码）、`secrets/` 均已加入 `.gitignore`，**切勿提交**；本地权限建议 `600`。
+- 数据库端口默认仅绑 `127.0.0.1`，**禁止对公网开放**；云服务器安全组只需开放平台网关等必要端口。

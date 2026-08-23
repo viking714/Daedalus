@@ -1,13 +1,12 @@
-# HiClaw AgentTeams - 云端数据库栈 (部署在阿里云 ECS, 8G 规格)
+# Daedalus / AgentTeams - 数据库栈（单机部署，与平台同机运行）
 #
-# 用法 (在 ECS 上):
-#   mkdir -p /opt/agentteams-db
-#   # 把本文件和 .env (由 .env.db 复制) 放到 /opt/agentteams-db/
-#   docker compose --env-file .env up -d
+# 用法：由统一部署脚本（deploy/scripts/install.sh / run.sh）自动编排：
+#   过滤 EXTERNAL 库 -> 生成 ${RUNTIME_DIR}/db/docker-compose.yml
+#   密码/连接来自同目录 .env（install.sh 首次生成，勿手改）
 #
 # 前置条件:
-#   - vm.max_map_count >= 262144  (Neo4j 必须, 见 scripts/deploy-db-ecs.sh 自动设置)
-#   - 端口仅绑定 127.0.0.1, 通过 SSH 隧道从本地访问, 绝不暴露公网
+#   - vm.max_map_count >= 262144  (Neo4j 必须, install.sh 自动设置)
+#   - 端口仅绑定 127.0.0.1, 绝不暴露公网
 #
 # 内存预算 (8G 机器):
 #   Ubuntu ~1G | postgres 0.5G | redis 0.1G | meili 0.3G | neo4j 3G(堆1.5+pagecache1.5) ≈ 6G, 余量 1G+
@@ -41,7 +40,7 @@ services:
     image: redis:7-alpine
     container_name: at-redis
     restart: unless-stopped
-    command: ["redis-server", "--save", "60", "1", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["sh", "-c", "redis-server --requirepass \"${REDIS_PASSWORD}\" --save 60 1 --maxmemory 128mb --maxmemory-policy allkeys-lru"]
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
