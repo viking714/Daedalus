@@ -810,6 +810,43 @@ platform_start() {
   fi
   wait_controller_ready && ok "controller 就绪" || warn "controller 未就绪"
 }
+# ============================================================================
+# MinIO 控制台暴露（内嵌于 controller 容器，端口未映射到宿主机；用 socat 转发）
+# ============================================================================
+expose_minio_console() {
+  local console_port="${MINIO_CONSOLE_PORT:-9001}" ip p
+  ip="$(docker inspect "${CONTROLLER}" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
+  if [[ -z "${ip}" ]]; then
+    warn "无法获取 controller IP，跳过 MinIO 控制台暴露"
+    return 0
+  fi
+  # 清理旧转发（容器重建后 IP 可能漂移），按监听端口精确匹配，避免误杀其它 socat
+  for p in $(pgrep -x socat 2>/dev/null); do
+    if ps -p "${p}" -o args= 2>/dev/null | grep -q "TCP-LISTEN:${console_port}"; then
+      kill "${p}" 2>/dev/null || true
+    fi
+  done
+  sleep 0.5
+  setsid socat "TCP-LISTEN:${console_port},fork,reuseaddr" "TCP:${ip}:${console_port}" \
+    >/var/log/minio-console-socat.log 2>&1 &
+  sleep 1
+  if curl -sf -o /dev/null "http://127.0.0.1:${console_port}/login"; then
+    ok "MinIO 控制台已暴露: http://<本机>:${console_port}（凭据见 controller 的 AGENTTEAMS_MINIO_USER/PASSWORD）"
+  else
+    warn "MinIO 控制台暴露失败，请检查 /var/log/minio-console-socat.log"
+  fi
+}
+
+stop_minio_console() {
+  local console_port="${MINIO_CONSOLE_PORT:-9001}" p
+  for p in $(pgrep -x socat 2>/dev/null); do
+    if ps -p "${p}" -o args= 2>/dev/null | grep -q "TCP-LISTEN:${console_port}"; then
+      kill "${p}" 2>/dev/null || true
+    fi
+  done
+  ok "MinIO 控制台转发已停止"
+}
+
 platform_stop() {
   # 先优雅休眠 worker，再停平台容器
   local w
@@ -818,6 +855,7 @@ platform_stop() {
     docker exec "${CONTROLLER}" agt worker sleep --name "${w}" >/dev/null 2>&1 || true
   done < <(get_registered_workers)
   docker stop "${MANAGER}" "${CONTROLLER}" >/dev/null 2>&1 || true
+  stop_minio_console
   ok "AgentTeams 平台已停止"
 }
 
@@ -831,7 +869,7 @@ print_summary() {
   echo ""
   if mcp_is_running; then echo -e "  ${GREEN}✓${NC} MCP Server      http://127.0.0.1:${MCP_PORT}/mcp (本机)"; else echo -e "  ${RED}✗${NC} MCP Server      未运行"; fi
   if docker ps --format '{{.Names}}' | grep -qxF "${CONTROLLER}" 2>/dev/null; then
-    echo -e "  ${GREEN}✓${NC} AgentTeams      Console :${AGENTTEAMS_PORT_CONSOLE:-18001}  Element :${AGENTTEAMS_PORT_ELEMENT_WEB:-18088}  Gateway :${AGENTTEAMS_PORT_GATEWAY:-18080}"
+    echo -e "  ${GREEN}✓${NC} AgentTeams      Console :${AGENTTEAMS_PORT_CONSOLE:-18001}  Element :${AGENTTEAMS_PORT_ELEMENT_WEB:-18088}  Gateway :${AGENTTEAMS_PORT_GATEWAY:-18080}  MinIO :${MINIO_CONSOLE_PORT:-9001}"
   else
     echo -e "  ${RED}✗${NC} AgentTeams       未运行"
   fi

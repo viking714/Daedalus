@@ -39,6 +39,7 @@ do_start() {
   if wait_controller_ready; then
     register_resources
     verify_deployment
+    expose_minio_console
   else
     warn "controller 未就绪，跳过资源注册与校验；请检查本机 'docker ps'"
   fi

@@ -34,6 +34,8 @@ bash deploy/scripts/install.sh
 bash deploy/scripts/run.sh start | stop | restart | status
 ```
 
+以上均有根目录 `make` 快捷入口：`make install / start / stop / restart / status`（SWE-bench 相关见 `make swe-bench*`）。
+
 `install.sh` 幂等可重跑：数据库密码首次随机生成并持久化到 `${RUNTIME_DIR}/db/.env`，
 后续运行复用；已安装平台则进入升级流程。
 

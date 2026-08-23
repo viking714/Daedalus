@@ -70,21 +70,23 @@ New roles (architect, designer, SRE, release manager) plug into the same declara
 
 Everything (AgentTeams platform, databases, and the domain-skills MCP server) runs on one
 machine — your laptop or a single server. No remote orchestration or SSH tunnels needed;
-just run the scripts on the target machine.
+just run the commands on the target machine. All operations are exposed as `make` targets
+(thin wrappers over `deploy/scripts/install.sh` and `deploy/scripts/run.sh`).
 
 First-time setup:
 
 ```bash
 cp deploy/config.env.example deploy/config.env   # fill in API keys / admin password
-bash deploy/scripts/install.sh
+make install                                     # install DB stack + MCP server + platform
 ```
 
 Daily operation — bring up the entire company with one command:
 
 ```bash
-bash deploy/scripts/run.sh start     # start DB stack + MCP server + platform
-bash deploy/scripts/run.sh stop      # shut everything down
-bash deploy/scripts/run.sh status    # deployment summary
+make start      # start DB stack + MCP server + platform
+make stop       # shut everything down
+make restart    # stop, then start
+make status     # deployment summary
 ```
 
 ## Evaluation
@@ -97,14 +99,16 @@ There are currently two ways to verify the agent team end-to-end:
 
 ```bash
 # Full pipeline: index → submit → wait → verify
-python scripts/swe_bench_runner.py
+make swe-bench
 
 # List available Flask instances
-python scripts/swe_bench_runner.py --list
+make swe-bench-list
 
 # Dry run (plan only, no actions)
-python scripts/swe_bench_runner.py --dry-run
+make swe-bench-dry
 ```
+
+Other runner targets: `make swe-bench-index` (index only), `make swe-bench-reset` / `make swe-bench-clean` (reset state/DB), `make swe-bench-rerun` (rerun all).
 
 **2. AgentTeams chat room**
 
