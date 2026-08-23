@@ -28,6 +28,7 @@ AGENTTEAMS_PINNED_VERSION="v1.2.3"
 AGENTTEAMS_INSTALLER_URL="https://raw.githubusercontent.com/agentscope-ai/AgentTeams/main/install/agentteams-install.sh"
 CONTROLLER="agentteams-controller"
 MANAGER="agentteams-manager"
+DASHBOARD="agentteams-dashboard"
 RD_WORKERS=(coordinator analyzer fixer tester evaluator)
 
 # ---- 颜色 ----
@@ -807,6 +808,10 @@ platform_start() {
     ok "AgentTeams 平台已在运行"
   else
     docker start "${CONTROLLER}" "${MANAGER}" >/dev/null 2>&1 || true
+    # dashboard 可能未安装（AGENTTEAMS_DASHBOARD=0），存在才启动
+    if docker ps -a --format '{{.Names}}' | grep -qxF "${DASHBOARD}" 2>/dev/null; then
+      docker start "${DASHBOARD}" >/dev/null 2>&1 || true
+    fi
   fi
   wait_controller_ready && ok "controller 就绪" || warn "controller 未就绪"
 }
@@ -855,6 +860,9 @@ platform_stop() {
     docker exec "${CONTROLLER}" agt worker sleep --name "${w}" >/dev/null 2>&1 || true
   done < <(get_registered_workers)
   docker stop "${MANAGER}" "${CONTROLLER}" >/dev/null 2>&1 || true
+  if docker ps --format '{{.Names}}' | grep -qxF "${DASHBOARD}" 2>/dev/null; then
+    docker stop "${DASHBOARD}" >/dev/null 2>&1 || true
+  fi
   stop_minio_console
   ok "AgentTeams 平台已停止"
 }
