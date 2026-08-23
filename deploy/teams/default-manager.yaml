@@ -6,9 +6,13 @@ metadata:
     app.kubernetes.io/name: rd-defect-closed-loop
 spec:
   displayName: RD Defect Manager
-  runtime: openclaw
+  # runtime 必须与安装器 AGENTTEAMS_MANAGER_RUNTIME 一致（v1.2.3 默认 qwenpaw；
+  # 镜像为 agentteams-manager-qwenpaw，写 openclaw 会导致容器内找不到二进制而崩溃重启）。
+  runtime: qwenpaw
   model: deepseek-ai/DeepSeek-V4-Pro
-  modelProvider: default
+  # 注意：不要写 modelProvider: default —— 新装环境可能不存在该 provider，
+  # 会导致 manager/worker 创建失败（model provider "default" not found）；
+  # 留空使用安装器配置的默认 provider。
   teamRefs:
     - name: rd-defect-team
   files:

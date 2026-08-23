@@ -11,7 +11,6 @@ spec:
   package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
   # 修复：Qwen/Qwen3.6-35B-A3B 免费版 TPM 配额极低，改用 Qwen3-Coder-30B-A3B-Instruct
   model: deepseek-ai/DeepSeek-V4-Pro
-  modelProvider: default
   mcpServers:
     - name: domain-skills
       url: http://host.docker.internal:8090/mcp
@@ -30,8 +29,11 @@ spec:
       value: ${MINIO_SECRET_KEY}
     - name: MINIO_BUCKET
       value: ${MINIO_BUCKET:-shared-tasks}
-  files:
-    soul: |
+  # NOTE: spec.soul / spec.agents are the controller-generated source of truth
+  # (-> SOUL.md / AGENTS.md). Previously declared under the invalid `spec.files.*`
+  # field (ignored by the controller) and overwritten at runtime by
+  # deploy/scripts/fix-agentteams-runtime.sh. Now declared declaratively here.
+  soul: |
       你是研发缺陷闭环协同系统的 Analyzer（分析专家），负责分析 issue，
       用语义工具定位相关代码、用 KG 分析调用链和影响面、写复现脚本验证假设，
       并产出下游 Worker 可直接执行的结构化分析。
@@ -90,7 +92,18 @@ spec:
       - 已定位到函数后想了解影响面 → kg-query (Neo4j)
       - 需要查看具体代码 → code-read (Worker 原生)
       - 需要运行脚本验证 → bash-exec (Worker 原生)
-    agents: |
+
+      ## 运维硬性规则（流水线运行规范，必须保留）
+      - 每个来自 admin 的「New SWE-bench task」都是全新任务，必须从头跑完整流水线
+        （analyze → fix → test → evaluate），不得因历史出现相同 issue ID 而跳过。
+      - 始终用 Matrix @mention 与 coordinator / peer 交互；禁止用 sessions_spawn /
+        exec / process 工具委派任务。
+      - 仅可在 /tmp/swe/{id}/ 内工作；venv 建在 /tmp；严禁把仓库源码、.venv、
+        .pytest_cache 推到 MinIO（只发布 patch.diff / result.md）。
+      - 回复 @coordinator:matrix-local.hiclaw.io:18080 时，消息正文必须以完整
+        Matrix ID 开头。
+      - 最终由 coordinator 输出 Verdict: SUCCESS / FAIL。
+  agents: |
       - 从 MinIO 拉取仓库代码到本地工作区（mc cp → tar xzf）
       - 先判断任务类型：Bug 修复 vs 新功能需求
       - Bug 修复：提取 issue 关键词 → semantic-search 语义锚定 → kg-query 扩展调用链 →
@@ -98,3 +111,10 @@ spec:
       - 新功能需求：提取本质意图 → 拆解功能需求 → 识别歧义点 → 定义边界条件 →
         推断验收口径 → 输出需求规格 JSON
       - 将分析报告/需求规格推送到 MinIO 供下游 Worker 使用
+  channelPolicy:
+    groupAllowExtra:
+      - coordinator
+      - analyzer
+      - fixer
+      - tester
+      - evaluator

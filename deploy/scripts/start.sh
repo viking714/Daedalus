@@ -48,7 +48,10 @@ manager_expected_model() {
 
 manager_expected_password() {
   if docker ps --format '{{.Names}}' | grep -qxF "hiclaw-controller"; then
-    docker exec hiclaw-controller sh -lc "sed -n 's/^WORKER_PASSWORD=\\\"\\(.*\\)\\\"$/\\1/p' /data/worker-creds/manager.env 2>/dev/null" | head -1
+    # 注意：/data/worker-creds/manager.env 在 manager 容器尚未重建时不存在，
+    # 直接读取会在 set -euo pipefail 下让整段脚本退出，跳过
+    # ensure_hiclaw_manager_aligned（导致 manager 无法重建）。这里必须容错。
+    docker exec hiclaw-controller sh -lc "sed -n 's/^WORKER_PASSWORD=\\\"\\(.*\\)\\\"$/\\1/p' /data/worker-creds/manager.env 2>/dev/null" 2>/dev/null | head -1 || true
   fi
 }
 
@@ -78,7 +81,10 @@ PY
 local_manager_env_value() {
   local key="$1"
   [[ -z "${key}" || ! -f "${LOCAL_MANAGER_ENV}" ]] && return 0
-  grep -E "^${key}=" "${LOCAL_MANAGER_ENV}" | head -1 | sed "s/^${key}=//"
+  # 在 set -euo pipefail 下，key 缺失时 grep 返回 1 会让整条管道返回 1，
+  # 进而导致调用处的 `local x="$(local_manager_env_value ...)"` 触发 set -e 中断。
+  # 追加 `|| true` 保证 key 缺失时返回 0，让上层 `${var:-default}` 兜底逻辑生效。
+  grep -E "^${key}=" "${LOCAL_MANAGER_ENV}" | head -1 | sed "s/^${key}=//" || true
 }
 
 manager_container_env_value() {
@@ -203,11 +209,18 @@ manager_container_drift_reason() {
 recreate_hiclaw_manager() {
   local image network_mode workdir restart_name workspace_dir host_share_dir manager_runtime
   local merged_env_file
-  image="$(docker inspect hiclaw-manager --format '{{.Config.Image}}' 2>/dev/null || \
-    echo 'higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager:latest')"
-  network_mode="$(docker inspect hiclaw-manager --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo 'hiclaw-net')"
-  workdir="$(docker inspect hiclaw-manager --format '{{.Config.WorkingDir}}' 2>/dev/null || echo '/root/manager-workspace')"
-  restart_name="$(docker inspect hiclaw-manager --format '{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null || echo 'unless-stopped')"
+  # 注意：manager 容器可能已被删除（docker inspect 失败）。多行命令替换
+  # `$(docker inspect ... || echo ...)` 会捕获到前导换行符，导致 docker run
+  # 报 "invalid reference format"。这里改用 `|| true` + `${var:-default}` 回退。
+  local _img _net _wd _restart
+  _img="$(docker inspect hiclaw-manager --format '{{.Config.Image}}' 2>/dev/null || true)"
+  _net="$(docker inspect hiclaw-manager --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || true)"
+  _wd="$(docker inspect hiclaw-manager --format '{{.Config.WorkingDir}}' 2>/dev/null || true)"
+  _restart="$(docker inspect hiclaw-manager --format '{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null || true)"
+  image="${_img:-higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/hiclaw-manager:latest}"
+  network_mode="${_net:-hiclaw-net}"
+  workdir="${_wd:-/root/manager-workspace}"
+  restart_name="${_restart:-unless-stopped}"
   workspace_dir="$(local_manager_env_value HICLAW_WORKSPACE_DIR)"
   host_share_dir="$(local_manager_env_value HICLAW_HOST_SHARE_DIR)"
   manager_runtime="$(local_manager_env_value HICLAW_MANAGER_RUNTIME)"
@@ -220,6 +233,7 @@ recreate_hiclaw_manager() {
 
   python3 - "${merged_env_file}" "${LOCAL_MANAGER_ENV}" <<'PY'
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -231,6 +245,14 @@ local_env_path = pathlib.Path(sys.argv[2])
 env_map = {}
 worker_env = {}
 controller_env = {}
+
+# 继承所有 HICLAW_* 环境变量（由上方 `source ${AGENTTEAMS_ENV}` 注入）。
+# 关键：manager 容器可能已不存在（docker inspect 返回空），此时
+# HICLAW_MATRIX_DOMAIN / HICLAW_ADMIN_USER / HICLAW_CMS_* 等变量只能从
+# agentteams.env 继承，否则 manager 启动会报 "HICLAW_MATRIX_DOMAIN is required"。
+for _key, _val in os.environ.items():
+    if _key.startswith("HICLAW_"):
+        env_map[_key] = _val
 try:
     out = subprocess.check_output(
         ["docker", "inspect", "hiclaw-manager", "--format", "{{json .Config.Env}}"],
@@ -297,6 +319,12 @@ if local_env_path.exists():
             "HICLAW_MINIO_USER",
             "HICLAW_MINIO_PASSWORD",
             "HICLAW_GITHUB_TOKEN",
+            "HICLAW_CMS_TRACES_ENABLED",
+            "HICLAW_CMS_ENDPOINT",
+            "HICLAW_CMS_LICENSE_KEY",
+            "HICLAW_CMS_PROJECT",
+            "HICLAW_CMS_WORKSPACE",
+            "HICLAW_CMS_SERVICE_NAME",
         }:
             env_map[key] = value
 
@@ -348,6 +376,10 @@ ensure_hiclaw_manager_aligned() {
   if [[ -n "${drift_reason}" ]]; then
     recreate_hiclaw_manager
     ok "hiclaw-manager 已按最新本地 env 重建"
+  elif [[ -z "${state}" ]]; then
+    # 容器不存在（被删除/从未创建）：docker start 会静默失败，必须重建。
+    recreate_hiclaw_manager
+    ok "hiclaw-manager 容器缺失，已重建"
   elif [[ "${state}" != "running" ]]; then
     docker start hiclaw-manager >/dev/null 2>&1 || true
   fi
@@ -621,6 +653,13 @@ echo ""
 # Step 5: 注册 Worker 并唤醒
 # ============================================================
 info "Step 5/5: 注册 Worker 角色并唤醒..."
+
+# 确保 HICLAW_CMS_* / AGENTLOOP_* 等变量已加载。
+# 注意：上面的 else 分支只在 MCP Server 未运行时才 source agentteams.env，
+# MCP 已运行时不会执行；这里补一次，保证后续 manager 重建能继承 CMS 配置。
+if [[ -f "${AGENTTEAMS_ENV}" ]]; then
+  set -a; source "${AGENTTEAMS_ENV}"; set +a
+fi
 
 # 等待 controller 就绪
 for i in $(seq 1 30); do

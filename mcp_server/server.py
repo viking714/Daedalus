@@ -226,7 +226,9 @@ def health_status() -> str:
 
 
 def main() -> None:
-    init_telemetry()
+    # MCP 层使用独立 service name，与 Worker 层（daedalus-agent-teams）分离，
+    # 避免 AgentLoop 调用链里 MCP 工具调用与 Worker 模型调用混在一起。
+    init_telemetry(os.getenv("MCP_OTEL_SERVICE_NAME", "daedalus-mcp-server"))
     port = int(os.getenv("MCP_PORT", os.getenv("PORT", "8090")))
     host = os.getenv("MCP_HOST", "0.0.0.0")
     logger.info(

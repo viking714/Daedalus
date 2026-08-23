@@ -11,7 +11,6 @@ spec:
   package: file:///deploy/packages/rd-defect-skills-v0.1.1.zip
   # 补充设计文档 §8.2：与 Fixer 同模型，代码专用天然理解 pytest 报错，多轮测试便宜优先
   model: deepseek-ai/DeepSeek-V4-Pro
-  modelProvider: default
   mcpServers:
     - name: domain-skills
       url: http://host.docker.internal:8090/mcp
@@ -30,8 +29,11 @@ spec:
       value: ${MINIO_SECRET_KEY}
     - name: MINIO_BUCKET
       value: ${MINIO_BUCKET:-shared-tasks}
-  files:
-    soul: |
+  # NOTE: spec.soul / spec.agents are the controller-generated source of truth
+  # (-> SOUL.md / AGENTS.md). Previously declared under the invalid `spec.files.*`
+  # field (ignored by the controller) and overwritten at runtime by
+  # deploy/scripts/fix-agentteams-runtime.sh. Now declared declaratively here.
+  soul: |
       你是研发缺陷闭环协同系统的 Tester（测试执行专家）。
 
       ## 核心职责：真实执行测试，不手工推测
@@ -148,10 +150,28 @@ spec:
       - 环境安装失败不算测试失败——区分"环境问题"和"修复问题"
       - 能区分异常类型差异（AssertionError ≠ ValueError）
       - 每一次测试结果都写文件，不依赖"我记得"
-    agents: |
+
+      ## 运维硬性规则（流水线运行规范，必须保留）
+      - 每个来自 admin 的「New SWE-bench task」都是全新任务，必须从头跑完整流水线
+        （analyze → fix → test → evaluate），不得因历史出现相同 issue ID 而跳过。
+      - 始终用 Matrix @mention 与 coordinator / peer 交互；禁止用 sessions_spawn /
+        exec / process 工具委派任务。
+      - 仅可在 /tmp/swe/{id}/ 内工作；venv 建在 /tmp；严禁把仓库源码、.venv、
+        .pytest_cache 推到 MinIO（只发布 patch.diff / result.md / test_results.json）。
+      - 回复 @coordinator:matrix-local.hiclaw.io:18080 时，消息正文必须以完整
+        Matrix ID 开头。
+      - 最终由 coordinator 输出 Verdict: SUCCESS / FAIL。
+  agents: |
       - 识别仓库语言和版本（Phase 1），输出报告
       - 在 Docker 隔离环境中安装依赖（Phase 2）
       - 执行复现验证 → 针对性测试 → 回归测试（Phase 3）
       - 将完整测试结果写入 shared/test_results.json
       - 失败时将精确错误诊断发到团队房间，触发 Fixer 迭代
       - 只有 Phase 3a+3b+3c 全部通过才算 task_verified
+  channelPolicy:
+    groupAllowExtra:
+      - coordinator
+      - analyzer
+      - fixer
+      - tester
+      - evaluator

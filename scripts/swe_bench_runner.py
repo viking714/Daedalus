@@ -31,13 +31,14 @@
     1. 全部服务已启动: ./deploy/scripts/start.sh
     2. pip install datasets requests
     3. Matrix 配置自动从 deploy/install/agentteams.env 读取（HICLAW_ADMIN_PASSWORD）
-       任务房间自动发现（或手动设置 MATRIX_ROOM_ID 环境变量）
+       派单房间严格取自 controller 当前 teamRoomID（MATRIX_ROOM_ID 不一致时忽略并告警）
 """
 
 import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -105,9 +106,27 @@ _hiclaw_matrix_domain = os.getenv("HICLAW_MATRIX_DOMAIN", "matrix-local.hiclaw.i
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", f"http://127.0.0.1:{_hiclaw_matrix_domain.split(':')[-1] if ':' in _hiclaw_matrix_domain else '18080'}")
 MATRIX_USER = os.getenv("MATRIX_USER", os.getenv("HICLAW_ADMIN_USER", "admin"))
 MATRIX_PASSWORD = os.getenv("MATRIX_PASSWORD", os.getenv("HICLAW_ADMIN_PASSWORD", ""))
-MATRIX_ROOM_ID = os.getenv("MATRIX_ROOM_ID", "")  # 留空则自动发现
+MATRIX_ROOM_ID = os.getenv("MATRIX_ROOM_ID", "")  # 仅作参考；与 controller teamRoomID 不一致时会被忽略
 MATRIX_TEAM_NAME = os.getenv("MATRIX_TEAM_NAME", "rd-defect-team")
-MATRIX_WORKSPACE_DIR = os.getenv("HICLAW_WORKSPACE_DIR", os.path.expanduser("~/hiclaw-manager"))
+MATRIX_WORKSPACE_DIR = os.path.expandvars(
+    os.path.expanduser(os.getenv("HICLAW_WORKSPACE_DIR", os.path.expanduser("~/hiclaw-manager"))))
+
+# AgentTeams v1.2.x 更名后的容器/CLI/MinIO 命名（环境变量可覆盖，兼容旧部署）：
+# 旧版为 hiclaw-controller/hiclaw CLI/hiclaw-storage 桶，v1.2.0 起全部改名。
+_CONTROLLER_CONTAINER = os.getenv("AGENTTEAMS_CONTROLLER_CONTAINER", "agentteams-controller")
+_MANAGER_CONTAINER = os.getenv("AGENTTEAMS_MANAGER_CONTAINER", "agentteams-manager")
+_WORKER_CONTAINER_PREFIX = os.getenv("AGENTTEAMS_WORKER_CONTAINER_PREFIX", "agentteams-worker")
+_AGENTTEAMS_CLI = os.getenv("AGENTTEAMS_CLI", "agt")
+_MINIO_PREFIX_ROOT = os.getenv("AGENTTEAMS_MINIO_PREFIX", "agentteams/agentteams-storage")
+
+# Team 内期望的全部成员（coordinator = leader + 4 个 specialist worker）。
+# 用于发现/校验派单房间时确认这些角色确实已加入该房间，避免把任务发到
+# controller 记录的陈旧 teamRoomID（成员不全 / 路由未绑定）导致无人响应、静默等待超时。
+# 对齐 AgentTeams 官方设计：所有角色通信都在同一个 public Team Room 中、彼此可见，
+# 派单房间必须包含 leader + 全部 worker，否则流水线无法协作。
+_WORKER_NAMES = ("analyzer", "fixer", "tester", "evaluator")
+_WORKER_USER_IDS = [f"@{n}:{_hiclaw_matrix_domain}" for n in _WORKER_NAMES]
+_COORDINATOR_USER_ID = f"@coordinator:{_hiclaw_matrix_domain}"
 
 # MCP Server
 MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
@@ -119,8 +138,13 @@ RESULTS_DIR = os.getenv("SWE_RESULTS_DIR", "results/swe-bench")
 
 # 超时
 INDEX_TIMEOUT_SEC = 600       # 索引超时
-TASK_TIMEOUT_SEC = 1800       # 单任务超时（30 分钟；流水线 analyze→fix→test→evaluate 实测约 10 分钟，留足余量）
+TASK_TIMEOUT_SEC = 3600       # 单任务超时（60 分钟；流水线 analyze→fix→test→evaluate 含修订回环实测 30-45 分钟）
 POLL_INTERVAL_SEC = 10        # 轮询间隔
+
+# 委派看门狗：worker 被 @ 委派后超过该秒数仍无任何发言，判定为失联/卡死，   
+# 触发容器级恢复 + 请求 coordinator 重新委派（对应用户此前多次手动做的事）。
+WATCHDOG_SILENCE_SEC = 600    # 被委派 worker 静默 10 分钟视为失联（实测 fix/analyze 阶段常静默工作 10-20 分钟；阈值过低会误杀正常阶段）
+WATCHDOG_COOLDOWN_SEC = 1200  # 同一阶段两次自动恢复的最小间隔，避免重启风暴
 
 # --------------------------------------------------------------------------- #
 # 数据结构
@@ -196,7 +220,7 @@ def _debug_report(hypothesis_id: str, location: str, msg: str, data: Optional[Di
 def _debug_team_snapshot() -> Dict:
     try:
         proc = subprocess.run(
-            ["docker", "exec", "hiclaw-controller", "hiclaw", "get", "teams", "-o", "json"],
+            ["docker", "exec", _CONTROLLER_CONTAINER, _AGENTTEAMS_CLI, "get", "teams", "-o", "json"],
             capture_output=True,
             text=True,
             timeout=8,
@@ -627,6 +651,39 @@ class MatrixClient:
         self.dispatch_user_id = f"@coordinator:{_hiclaw_matrix_domain}"
         self._login(password)
 
+    @staticmethod
+    def ensure_workers_ready() -> bool:
+        """提交任务前经 controller 确认全部 worker 就绪（官方 lifecycle：ensure-ready）。
+
+        容器 running 不代表 agent 可用（休眠/失联时容器仍在），必须走 controller 的
+        ensure-ready 语义，避免把任务派给无人响应的团队后静默等待超时。
+        """
+        try:
+            proc = subprocess.run(
+                ["docker", "exec", _CONTROLLER_CONTAINER, _AGENTTEAMS_CLI, "get", "workers", "-o", "json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            names = sorted({
+                w.get("name", "")
+                for w in json.loads(proc.stdout or "{}").get("workers", [])
+                if w.get("name")
+            })
+        except Exception as e:
+            log.warning("读取 worker 列表失败，跳过 ensure-ready 预检: %s", e)
+            return True
+        ok = True
+        for name in names:
+            r = subprocess.run(
+                ["docker", "exec", _CONTROLLER_CONTAINER, _AGENTTEAMS_CLI, "worker", "ensure-ready", "--name", name],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode == 0:
+                log.info("worker 就绪: %s", name)
+            else:
+                ok = False
+                log.error("worker ensure-ready 失败: %s (%s)", name, (r.stderr or r.stdout or "").strip()[:200])
+        return ok
+
     def _login(self, password: str):
         import urllib.request
         url = f"{self.hs}/_matrix/client/r0/login"
@@ -642,134 +699,55 @@ class MatrixClient:
         log.info("Matrix 登录成功: %s", self.user)
 
     def discover_room(self, team_name: str = MATRIX_TEAM_NAME) -> str:
-        """自动发现任务派单房间。
+        """发现任务派单房间（严格模式：只信任 controller 管理的 Team Room）。
 
-        按优先级查找（team room 优先，因为只有 team room 才包含全部 worker）：
-        1. controller 当前 team room（teamRoomID，所有 worker 都在）
-        2. controller 当前 team leader 的 leader room
-        3. 本地 workers-registry.json 中的 team leader room
-        4. 本地 teams-registry.json 中当前 team 的 room_id
-        5. 房间名精确匹配当前 team
-        6. 房间名包含 "bugfix" / "task" / "defect" 的房间
-        7. 用户加入的第一个房间
+        历史教训：手工创建的房间（如 swebench-retry）即使拉齐了全部成员，也没有
+        controller 的消息路由绑定，coordinator 委派后其他 worker 不会被唤醒，导致
+        流水线静默超时。因此：
+        1. 唯一合法目标是 controller team 资源当前的 teamRoomID（成员校验通过）；
+        2. 显式 MATRIX_ROOM_ID 与之一致才生效，否则忽略并告警；
+        3. 校验不通过直接返回空串（调用方报错退出），绝不降级到任意“成员齐”的房间。
         """
-        import urllib.request
-
         self.dispatch_user_id = f"@coordinator:{_hiclaw_matrix_domain}"
 
-        # 优先级 1：controller 当前 team room（teamRoomID，含 coordinator + 4 个子 worker）
         controller_team_room_id = self._get_team_room_from_controller(team_name)
-        if controller_team_room_id:
-            room_name = self._get_room_name(controller_team_room_id)
-            if room_name:
-                log.info(
-                    "从 controller team 资源读取任务房间: %s (%s) → %s",
-                    controller_team_room_id,
-                    room_name,
-                    self.dispatch_user_id,
-                )
-                return controller_team_room_id
-
-        leader_binding = self._get_team_leader_binding_from_controller(team_name)
-        controller_room_id = leader_binding.get("room_id", "")
-        if controller_room_id:
-            self.dispatch_user_id = leader_binding.get("matrix_user_id") or self.dispatch_user_id
-            room_name = self._get_room_name(controller_room_id)
-            if room_name:
-                log.info(
-                    "从 controller team leader 资源读取派单房间: %s (%s) → %s",
-                    controller_room_id,
-                    room_name,
-                    self.dispatch_user_id,
-                )
-                return controller_room_id
-
-        registry_leader_room_id = self._get_team_leader_room_from_workspace(team_name)
-        if registry_leader_room_id:
-            room_name = self._get_room_name(registry_leader_room_id)
-            if room_name:
-                log.info(
-                    "从 workers-registry.json 读取 team leader 房间: %s (%s) → %s",
-                    registry_leader_room_id,
-                    room_name,
-                    self.dispatch_user_id,
-                )
-                return registry_leader_room_id
-
-        registry_room_id = self._get_team_room_from_workspace(team_name)
-        if registry_room_id:
-            room_name = self._get_room_name(registry_room_id)
-            if room_name:
-                log.info("从 teams-registry.json 读取任务房间: %s (%s)", registry_room_id, room_name)
-                return registry_room_id
-
-        url = f"{self.hs}/_matrix/client/r0/joined_rooms"
-        req = urllib.request.Request(
-            url, headers={"Authorization": f"Bearer {self.token}"}
-        )
-        with urllib.request.urlopen(req) as r:
-            body = json.loads(r.read().decode())
-        room_ids = body.get("joined_rooms", [])
-
-        if not room_ids:
-            log.error("未找到任何 Matrix 房间，请先在 Element Web 中创建任务房间")
+        if not controller_team_room_id:
+            log.error(
+                "controller 未返回 team=%s 的 teamRoomID，无法确定合法派单房间。"
+                "请先执行 ./deploy/scripts/reset-agentteams-rooms.sh --yes 重建 team。",
+                team_name,
+            )
             return ""
 
-        # Priority 5: Find Team Room (room with coordinator + most other workers)
-        coordinator_user_id = f"@coordinator:{_hiclaw_matrix_domain}"
-        worker_user_ids = [
-            f"@{w}:{_hiclaw_matrix_domain}"
-            for w in ("coordinator", "analyzer", "fixer", "tester", "evaluator")
-        ]
-        best_room = ""
-        best_worker_count = 0
-        for room_id in room_ids:
-            try:
-                members_url = f"{self.hs}/_matrix/client/r0/rooms/{urllib.parse.quote(room_id)}/members"
-                members_req = urllib.request.Request(
-                    members_url, headers={"Authorization": f"Bearer {self.token}"}
-                )
-                with urllib.request.urlopen(members_req, timeout=5) as mr:
-                    members_body = json.loads(mr.read().decode())
-                member_ids = {ev.get("state_key", "") for ev in members_body.get("chunk", [])}
-                if coordinator_user_id in member_ids:
-                    worker_count = sum(1 for w in worker_user_ids if w in member_ids)
-                    if worker_count > best_worker_count:
-                        best_worker_count = worker_count
-                        best_room = room_id
-            except Exception:
-                continue
-        if best_room:
-            log.info(
-                "发现 Team Room (%d/%d workers): %s",
-                best_worker_count,
-                len(worker_user_ids),
-                best_room,
+        members = self._get_room_members(controller_team_room_id)
+        if not self._is_valid_team_room(members):
+            missing = [u for u in ([self.dispatch_user_id] + _WORKER_USER_IDS) if u not in members]
+            log.error(
+                "controller teamRoomID=%s 成员不完整(缺失 %s)，拒绝派单。"
+                "请执行 ./deploy/scripts/reset-agentteams-rooms.sh --yes 重建 team 后重试。",
+                controller_team_room_id, missing,
             )
-            return best_room
+            return ""
 
-        expected_team_room_name = f"team: {team_name}".lower()
-        for room_id in room_ids:
-            room_name = self._get_room_name(room_id)
-            if room_name and room_name.lower() == expected_team_room_name:
-                log.info("按 team 名命中任务房间: %s (%s)", room_id, room_name)
-                return room_id
+        if MATRIX_ROOM_ID and MATRIX_ROOM_ID != controller_team_room_id:
+            log.warning(
+                "环境变量 MATRIX_ROOM_ID=%s 与 controller 当前 teamRoomID 不一致，"
+                "忽略 MATRIX_ROOM_ID，使用 controller 管理的房间（避免派单到无路由绑定的陈旧房间）。",
+                MATRIX_ROOM_ID,
+            )
 
-        for room_id in room_ids:
-            room_name = self._get_room_name(room_id)
-            if room_name and any(kw in room_name.lower() for kw in ("bugfix", "task", "defect", team_name.lower())):
-                log.info("自动发现任务房间: %s (%s)", room_id, room_name)
-                return room_id
-
-        # 如果没找到命名的任务房间，返回第一个
-        log.info("未找到命名任务房间，使用第一个房间: %s", room_ids[0])
-        return room_ids[0]
+        room_name = self._get_room_name(controller_team_room_id)
+        log.info(
+            "使用 controller team room: %s (%s) → %s",
+            controller_team_room_id, room_name or "(未命名)", self.dispatch_user_id,
+        )
+        return controller_team_room_id
 
     def _get_team_leader_binding_from_controller(self, team_name: str) -> Dict[str, str]:
         """优先读取 controller 当前 team leader 房间，避免把任务发到 team room。"""
         try:
             proc = subprocess.run(
-                ["docker", "exec", "hiclaw-controller", "hiclaw", "get", "workers", "-o", "json"],
+                ["docker", "exec", _CONTROLLER_CONTAINER, _AGENTTEAMS_CLI, "get", "workers", "-o", "json"],
                 capture_output=True,
                 text=True,
                 timeout=8,
@@ -798,7 +776,7 @@ class MatrixClient:
         """优先读取 controller 当前 team 资源，避免命中本地陈旧 room 绑定。"""
         try:
             proc = subprocess.run(
-                ["docker", "exec", "hiclaw-controller", "hiclaw", "get", "teams", "-o", "json"],
+                ["docker", "exec", _CONTROLLER_CONTAINER, _AGENTTEAMS_CLI, "get", "teams", "-o", "json"],
                 capture_output=True,
                 text=True,
                 timeout=8,
@@ -864,6 +842,29 @@ class MatrixClient:
         except Exception:
             return ""
 
+    def _get_room_members(self, room_id: str) -> set:
+        """获取房间全部成员 user_id 集合。"""
+        import urllib.request
+        import urllib.parse
+        try:
+            url = (
+                f"{self.hs}/_matrix/client/r0/rooms/"
+                f"{urllib.parse.quote(room_id)}/members"
+            )
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                body = json.loads(r.read().decode())
+            return {ev.get("state_key", "") for ev in body.get("chunk", [])}
+        except Exception as e:
+            log.warning("读取房间成员失败 %s: %s", room_id, e)
+            return set()
+
+    def _is_valid_team_room(self, members: set) -> bool:
+        """team room 必须含 coordinator(leader) + 全部 4 个 specialist worker。"""
+        if self.dispatch_user_id not in members:
+            return False
+        return all(w in members for w in _WORKER_USER_IDS)
+
     def send_task(self, room_id: str, instance: SweInstance) -> str:
         """发送任务消息到房间，返回 event_id。"""
         import urllib.request
@@ -928,32 +929,233 @@ class MatrixClient:
         # #endregion
         return event_id
 
+    def send_mention_message(self, room_id: str, text: str, mention_user_ids: List[str]) -> str:
+        """发送带 m.mentions 的管理员消息（用于唤醒 coordinator / worker）。
+
+        openclaw/copaw gateway 均要求 requireMention，仅正文写 @xxx 不会触发唤醒，
+        必须同时带 m.mentions.user_ids 和 formatted_body 的 matrix.to mention 链接。
+        """
+        import urllib.request
+        import urllib.parse
+        txn_id = f"swe_admin_{int(time.time() * 1000)}"
+        url = (
+            f"{self.hs}/_matrix/client/r0/rooms/"
+            f"{urllib.parse.quote(room_id)}/send/m.room.message/{txn_id}"
+        )
+        mention_html = " ".join(
+            f'<a href="https://matrix.to/#/{uid}">{uid.split(":")[0].lstrip("@")}</a>'
+            for uid in mention_user_ids
+        )
+        payload = json.dumps(
+            {
+                "msgtype": "m.text",
+                "body": text,
+                "format": "org.matrix.custom.html",
+                "formatted_body": f"{mention_html} {text}",
+                "m.mentions": {"user_ids": list(mention_user_ids)},
+            }
+        ).encode()
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.token}",
+            },
+            method="PUT",
+        )
+        with urllib.request.urlopen(req) as r:
+            body = json.loads(r.read().decode())
+        return body.get("event_id", "")
+
 # --------------------------------------------------------------------------- #
 # 完成检测
 # --------------------------------------------------------------------------- #
 
-def _pull_minio_artifacts(instance_id: str, inst_dir: str) -> bool:
-    """从 MinIO 拉取 agent 发布的 artifacts (spec.md, plan.md, result.md, patch.diff)。"""
+def _minio_task_prefixes(instance_id: str) -> List[str]:
+    """列出 shared/tasks/ 下与该实例相关的所有任务目录前缀。
+
+    新平台（v1.2.x）的任务目录名为 {instance}-{时间戳}-{序号}（且 instance 中的
+    下划线被归一化为连字符，如 pallets__flask-4045 → pallets-flask-4045-…），
+    产物分散在多个子目录（如 patch 在 -02，result 在 -01），因此不能只按
+    精确目录名拉取，需按规范化前缀扫描全部匹配目录。
+    """
+    import re
     import subprocess
-    minio_prefix = f"hiclaw/hiclaw-storage/shared/tasks/{instance_id}"
+    tasks_root = f"{_MINIO_PREFIX_ROOT}/shared/tasks/"
+    # 平台会把连续下划线折叠为单个连字符（pallets__flask-4045 → pallets-flask-4045-…）
+    norm = re.sub(r"_+", "-", instance_id)
+    prefixes = [f"{tasks_root}{instance_id}"]  # 精确名优先（旧平台格式）
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", _CONTROLLER_CONTAINER, "mc", "ls", tasks_root],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                name = line.split()[-1].rstrip("/") if line.split() else ""
+                if name and (name == instance_id or name.startswith(norm + "-")):
+                    p = f"{tasks_root}{name}"
+                    if p not in prefixes:
+                        prefixes.append(p)
+    except Exception as e:
+        log.warning("MinIO 任务目录扫描失败，回退精确路径: %s", e)
+    return prefixes
+
+
+def _pull_minio_artifacts(instance_id: str, inst_dir: str) -> bool:
+    """从 MinIO 拉取 agent 发布的 artifacts (spec.md, plan.md, result.md, patch.diff)。
+
+    遍历所有匹配的任务目录（旧→新），同名文件后出现的覆盖先出现的，
+    保证各角色分散在不同子目录里的产物都能拿到且取最新。
+    """
+    import subprocess
     files = ["spec.md", "plan.md", "result.md", "patch.diff"]
     pulled = False
-    for fname in files:
-        local_path = os.path.join(inst_dir, fname)
-        try:
-            proc = subprocess.run(
-                ["docker", "exec", "hiclaw-controller", "mc", "cat",
-                 f"{minio_prefix}/{fname}"],
-                capture_output=True, timeout=10
-            )
-            if proc.returncode == 0 and proc.stdout:
-                with open(local_path, "wb") as f:
-                    f.write(proc.stdout)
-                log.info("从 MinIO 拉取: %s (%d bytes)", fname, len(proc.stdout))
-                pulled = True
-        except Exception:
-            pass
+    for prefix in _minio_task_prefixes(instance_id):
+        for fname in files:
+            local_path = os.path.join(inst_dir, fname)
+            try:
+                proc = subprocess.run(
+                    ["docker", "exec", _CONTROLLER_CONTAINER, "mc", "cat",
+                     f"{prefix}/{fname}"],
+                    capture_output=True, timeout=10
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    with open(local_path, "wb") as f:
+                        f.write(proc.stdout)
+                    log.info("从 MinIO 拉取: %s/%s (%d bytes)",
+                             prefix.split('/')[-1], fname, len(proc.stdout))
+                    pulled = True
+            except Exception:
+                pass
     return pulled
+
+
+def _scan_room_events(matrix_client, room_id: str, since_ts_ms: int = 0,
+                      max_pages: int = 6, page_limit: int = 100) -> List[Dict]:
+    """倒序分页拉取房间消息事件（最新在前）。
+
+    触达早于 since_ts_ms 的事件即停止翻页；网络异常时返回已拉到的部分，
+    保证调用方（verdict 扫描 / 委派看门狗）在噪声较大的房间里也有足够窗口。
+    """
+    import urllib.request
+    import urllib.parse
+    events: List[Dict] = []
+    from_token = ""
+    for _ in range(max_pages):
+        url = (f"{matrix_client.hs}/_matrix/client/r0/rooms/"
+               f"{urllib.parse.quote(room_id)}/messages?dir=b&limit={page_limit}")
+        if from_token:
+            url += f"&from={urllib.parse.quote(from_token)}"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {matrix_client.token}"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                body = json.loads(r.read().decode())
+        except Exception:
+            break
+        chunk = body.get("chunk", [])
+        if not chunk:
+            break
+        oldest_ts = None
+        for ev in chunk:
+            ts = ev.get("origin_server_ts", 0)
+            oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
+            # 先全量收集，再按时间过滤：历史教训是「页内遇到边界即丢弃后续事件」，
+            # Matrix 分页不保证页内严格全局有序，提前 break 会把仍在窗口内的
+            # worker 响应误判为不存在，导致看门狗对正常工作的 worker 误报失联。
+            if since_ts_ms and ts < since_ts_ms:
+                continue
+            events.append(ev)
+        # 整页最旧事件已早于边界，后续页只会更旧，停止翻页
+        if since_ts_ms and oldest_ts is not None and oldest_ts < since_ts_ms:
+            break
+        from_token = body.get("end", "")
+        if not from_token:
+            break
+    return events
+
+
+# coordinator 消息正文中对 worker 的文字 @ 提及（m.mentions 缺失时的兜底判据）
+_DELEGATION_RE = re.compile(r"@(analyzer|fixer|tester|evaluator)(?::|\s)")
+
+
+def _detect_stuck_delegation(matrix_client, room_id: str, since_ts_ms: int):
+    """检测「被委派后无响应」的 worker（Matrix sync 掉线 / 卡死）。
+
+    判据：coordinator 对某 worker 的最近一次委派（m.mentions 或正文 @ 提及）
+    已超过 WATCHDOG_SILENCE_SEC，且该 worker 在委派之后没有发过任何消息。
+    返回 (worker_name, silence_sec)；无异常委派时返回 None。
+    """
+    events = _scan_room_events(matrix_client, room_id, since_ts_ms, max_pages=6)
+    delegation_ts: Dict[str, int] = {}
+    worker_last_ts: Dict[str, int] = {}
+    for ev in events:  # 最新在前 → setdefault 记录的即最近一次
+        if ev.get("type") != "m.room.message":
+            continue
+        sender = ev.get("sender", "")
+        ts = int(ev.get("origin_server_ts", 0))
+        if sender.startswith("@coordinator:"):
+            content = ev.get("content", {}) or {}
+            targets = set()
+            for uid in (content.get("m.mentions") or {}).get("user_ids", []) or []:
+                m = re.match(r"@(\w+):", uid or "")
+                if m and m.group(1) in _WORKER_NAMES:
+                    targets.add(m.group(1))
+            for m in _DELEGATION_RE.finditer(content.get("body", "") or ""):
+                targets.add(m.group(1))
+            for w in targets:
+                delegation_ts.setdefault(w, ts)
+        else:
+            m = re.match(r"@(\w+):", sender)
+            if m and m.group(1) in _WORKER_NAMES:
+                worker_last_ts.setdefault(m.group(1), ts)
+
+    now_ms = int(time.time() * 1000)
+    worst = None
+    for w, dts in delegation_ts.items():
+        if worker_last_ts.get(w, 0) > dts:
+            continue  # 该 worker 在委派后已有响应，视为正常
+        silence = (now_ms - dts) / 1000.0
+        if silence >= WATCHDOG_SILENCE_SEC and (worst is None or silence > worst[1]):
+            worst = (w, silence)
+    return worst
+
+
+def _recover_stuck_worker(matrix_client, room_id: str, worker_name: str, instance_id: str):
+    """看门狗恢复动作：容器级重启 + controller ensure-ready + 请求 coordinator 重新委派。
+
+    自动化此前需要人工执行的恢复流程（重启失联 worker 后请 coordinator 重新 @ 委派）。
+    """
+    log.warning("watchdog: %s 被委派后超过阈值仍未发言，判定失联，开始自动恢复", worker_name)
+    try:
+        subprocess.run(
+            ["docker", "restart", f"{_WORKER_CONTAINER_PREFIX}-{worker_name}"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        log.error("watchdog: 重启容器失败 %s: %s", worker_name, e)
+    try:
+        r = subprocess.run(
+            ["docker", "exec", _CONTROLLER_CONTAINER, _AGENTTEAMS_CLI, "worker", "ensure-ready", "--name", worker_name],
+            capture_output=True, text=True, timeout=180,
+        )
+        if r.returncode != 0:
+            log.error("watchdog: ensure-ready 失败 %s: %s", worker_name, (r.stderr or r.stdout or "").strip()[:200])
+    except Exception as e:
+        log.error("watchdog: ensure-ready 异常 %s: %s", worker_name, e)
+    # 请求 coordinator 重新委派（必须带 m.mentions 才能唤醒 copaw runtime 的 coordinator）
+    worker_uid = f"@{worker_name}:{_hiclaw_matrix_domain}"
+    text = (
+        f"{_COORDINATOR_USER_ID} Watchdog notice: worker {worker_name} 的 Matrix 连接此前无响应，"
+        f"已自动重启容器并重新确认就绪。请重新向 {worker_uid} 委派 [{instance_id}] 当前阶段的任务。"
+    )
+    try:
+        matrix_client.send_mention_message(room_id, text, [_COORDINATOR_USER_ID])
+        log.info("watchdog: 已向 coordinator 发送重新委派请求 (%s)", worker_name)
+    except Exception as e:
+        log.error("watchdog: 发送重新委派请求失败: %s", e)
 
 
 def _scan_matrix_verdict(matrix_client, room_id: str, instance_id: str, since_ts_ms: int = 0) -> Optional[Dict[str, str]]:
@@ -961,22 +1163,11 @@ def _scan_matrix_verdict(matrix_client, room_id: str, instance_id: str, since_ts
 
     仅接受「任务提交之后」出现的 coordinator verdict 消息：
     - since_ts_ms：提交时刻（毫秒），早于此时间的历史消息一律忽略；
-    - instance_id 匹配：若消息中明确提到了其它 instance_id（pallets__xxx），跳过。
+    - instance_id 匹配：若消息中明确提到的其它 instance_id（pallets__xxx），跳过。
+    扫描窗口为倒序分页拉取（最多 6 页 × 100 条），覆盖多轮返工的高噪声房间。
     """
-    import urllib.request, re
     try:
-        url = (f"{matrix_client.hs}/_matrix/client/r0/rooms/"
-               f"{urllib.parse.quote(room_id)}/messages?dir=b&limit=50")
-        req = urllib.request.Request(
-            url, headers={"Authorization": f"Bearer {matrix_client.token}"}
-        )
-        with urllib.request.urlopen(req, timeout=5) as r:
-            body = json.loads(r.read().decode())
-        for event in body.get("chunk", []):
-            # 时间过滤：忽略任务提交前的历史消息
-            ts = event.get("origin_server_ts", 0)
-            if since_ts_ms and ts < since_ts_ms:
-                continue
+        for event in _scan_room_events(matrix_client, room_id, since_ts_ms, max_pages=6):
             if not event.get("sender", "").startswith("@coordinator:"):
                 continue
             content = event.get("content", {})
@@ -985,9 +1176,9 @@ def _scan_matrix_verdict(matrix_client, room_id: str, instance_id: str, since_ts
             mentioned_ids = re.findall(r"pallets__[\w.-]+", msg_body)
             if mentioned_ids and instance_id not in mentioned_ids:
                 continue
-            m = re.search(r"Verdict:\s*(SUCCESS|FAIL)", msg_body)
-            if m:
-                verdict = m.group(1)
+            verdict_m = re.search(r"Verdict:\s*(SUCCESS|FAIL)", msg_body)
+            if verdict_m:
+                verdict = verdict_m.group(1)
                 # Try to extract patch from the message
                 patch = ""
                 patch_m = re.search(r"```diff\s*\n(.*?)```", msg_body, re.DOTALL)
@@ -1023,6 +1214,9 @@ def wait_for_completion(matrix_client, room_id: str, instance_id: str, timeout_s
     # #endregion
 
     submit_ts_ms = getattr(matrix_client, "last_submit_ts_ms", 0)
+    # 委派看门狗状态：上次检查时刻 + 每个 worker 上次自动恢复时刻（冷却防重启风暴）
+    last_watchdog_check = 0.0
+    watchdog_last_recover: Dict[str, float] = {}
     while time.time() - start < timeout_sec:
         # 检查 Matrix 消息中的 verdict（agent 通过聊天输出的结果）
         verdict_from_matrix = _scan_matrix_verdict(matrix_client, room_id, instance_id, submit_ts_ms)
@@ -1106,6 +1300,28 @@ def wait_for_completion(matrix_client, room_id: str, instance_id: str, timeout_s
             # #endregion
             return result
 
+        # 委派看门狗：coordinator 委派后 worker 长时间无响应（Matrix sync 掉线/卡死）
+        # → 容器级恢复 + 请求 coordinator 重新委派，避免静默等到任务整体超时。
+        now = time.time()
+        if submit_ts_ms and now - last_watchdog_check >= 30:
+            last_watchdog_check = now
+            try:
+                stuck = _detect_stuck_delegation(matrix_client, room_id, submit_ts_ms)
+                if stuck:
+                    stuck_worker, silence_sec = stuck
+                    last_recover = watchdog_last_recover.get(stuck_worker, 0.0)
+                    if now - last_recover >= WATCHDOG_COOLDOWN_SEC:
+                        watchdog_last_recover[stuck_worker] = now
+                        _recover_stuck_worker(matrix_client, room_id, stuck_worker, instance_id)
+                    else:
+                        log.info(
+                            "watchdog: %s 仍无响应 (静默 %.0fs)，处于恢复冷却期 (剩余 %.0fs)",
+                            stuck_worker, silence_sec,
+                            WATCHDOG_COOLDOWN_SEC - (now - last_recover),
+                        )
+            except Exception as e:
+                log.debug("watchdog 检查异常（忽略）: %s", e)
+
         elapsed = int(time.time() - start)
         if elapsed - last_debug_emit >= 60:
             last_debug_emit = elapsed
@@ -1165,7 +1381,7 @@ def _find_verdict_file(instance_id: str) -> Optional[str]:
         container_path = f"/tmp/{sub}/verdict.json"
         try:
             r = subprocess.run(
-                ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
+                ["docker", "exec", _MANAGER_CONTAINER, "test", "-f", container_path],
                 capture_output=True, timeout=3,
             )
             if r.returncode == 0:
@@ -1173,7 +1389,7 @@ def _find_verdict_file(instance_id: str) -> Optional[str]:
                 host_path = os.path.join(RESULTS_DIR, instance_id, "verdict.json")
                 os.makedirs(os.path.dirname(host_path), exist_ok=True)
                 subprocess.run(
-                    ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
+                    ["docker", "cp", f"{_MANAGER_CONTAINER}:{container_path}", host_path],
                     capture_output=True, timeout=5,
                 )
                 if os.path.exists(host_path):
@@ -1185,14 +1401,14 @@ def _find_verdict_file(instance_id: str) -> Optional[str]:
     container_path = f"/root/{instance_id}/result.md"
     try:
         r = subprocess.run(
-            ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
+            ["docker", "exec", _MANAGER_CONTAINER, "test", "-f", container_path],
             capture_output=True, timeout=3,
         )
         if r.returncode == 0:
             host_path = os.path.join(RESULTS_DIR, instance_id, "result.md")
             os.makedirs(os.path.dirname(host_path), exist_ok=True)
             subprocess.run(
-                ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
+                ["docker", "cp", f"{_MANAGER_CONTAINER}:{container_path}", host_path],
                 capture_output=True, timeout=5,
             )
             if os.path.exists(host_path):
@@ -1212,14 +1428,14 @@ def _find_diff_file(instance_id: str) -> Optional[str]:
         container_path = f"/tmp/{sub}/fix.diff"
         try:
             r = subprocess.run(
-                ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
+                ["docker", "exec", _MANAGER_CONTAINER, "test", "-f", container_path],
                 capture_output=True, timeout=3,
             )
             if r.returncode == 0:
                 host_path = os.path.join(RESULTS_DIR, instance_id, "fix.diff")
                 os.makedirs(os.path.dirname(host_path), exist_ok=True)
                 subprocess.run(
-                    ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
+                    ["docker", "cp", f"{_MANAGER_CONTAINER}:{container_path}", host_path],
                     capture_output=True, timeout=5,
                 )
                 if os.path.exists(host_path):
@@ -1230,14 +1446,14 @@ def _find_diff_file(instance_id: str) -> Optional[str]:
     container_path = f"/root/{instance_id}/patch.diff"
     try:
         r = subprocess.run(
-            ["docker", "exec", "hiclaw-manager", "test", "-f", container_path],
+            ["docker", "exec", _MANAGER_CONTAINER, "test", "-f", container_path],
             capture_output=True, timeout=3,
         )
         if r.returncode == 0:
             host_path = os.path.join(RESULTS_DIR, instance_id, "fix.diff")
             os.makedirs(os.path.dirname(host_path), exist_ok=True)
             subprocess.run(
-                ["docker", "cp", f"hiclaw-manager:{container_path}", host_path],
+                ["docker", "cp", f"{_MANAGER_CONTAINER}:{container_path}", host_path],
                 capture_output=True, timeout=5,
             )
             if os.path.exists(host_path):
@@ -1286,6 +1502,8 @@ def _task_artifact_dirs(instance_id: str) -> List[str]:
         os.path.join(MATRIX_WORKSPACE_DIR, "shared", "tasks"),
         os.path.expanduser("~/hiclaw-manager/.openclaw/tasks"),
         os.path.expanduser("~/hiclaw-manager/shared/tasks"),
+        os.path.expanduser("~/agentteams-manager/.openclaw/tasks"),
+        os.path.expanduser("~/agentteams-manager/shared/tasks"),
     ]
     dirs = []
     for root in roots:
@@ -1522,7 +1740,13 @@ def _remove_path(path: str) -> bool:
 
 
 def clear_run_artifacts(instance_ids: List[str], results_dir: str) -> Dict[str, int]:
-    """清理历史运行产物，避免 rerun 时误读旧 verdict/diff。"""
+    """清理历史运行产物，避免 rerun 时误读旧 verdict/diff。
+
+    注意：coordinator(copaw) 的会话状态由 MinIO 后端承载，且重启时会把内存里的
+    会话 flush 回 MinIO，因此单纯删本地文件/重启容器无法清掉"pipeline already
+    running"这类陈旧状态——必须由外部（见运维手册）重置 coordinator 容器才能解决。
+    本函数只负责清理 runner 侧的本地结果目录与 MinIO 共享产物缓存。
+    """
     removed = {"run_state": 0, "instance_dirs": 0}
 
     state_path = os.path.join(results_dir, "run_state.json")
@@ -1533,6 +1757,7 @@ def clear_run_artifacts(instance_ids: List[str], results_dir: str) -> Dict[str, 
         os.path.abspath(results_dir),
         "/tmp/swe-results",
         os.path.expanduser("~/hiclaw-manager/shared/tasks"),
+        os.path.expanduser("~/agentteams-manager/shared/tasks"),
     ]
     for base_dir in base_dirs:
         for instance_id in instance_ids:
@@ -1544,9 +1769,28 @@ def clear_run_artifacts(instance_ids: List[str], results_dir: str) -> Dict[str, 
         short_id = instance_id.split("-")[-1]
         for sub in ["swe-bench", f"swe-{short_id}", instance_id]:
             subprocess.run(
-                ["docker", "exec", "hiclaw-manager", "rm", "-rf", f"/tmp/{sub}"],
+                ["docker", "exec", _MANAGER_CONTAINER, "rm", "-rf", f"/tmp/{sub}"],
                 capture_output=True, timeout=3,
             )
+
+    # 5. MinIO 共享产物（workers 发布的 spec/plan/result/patch 存于此，
+    #    rerun 若不清理，evaluator/coordinator 可能直接读到旧 patch.diff 而"假通过"）。
+    #    这是"重复运行直接出结果、根本没测试"的根因之一，必须递归删除。
+    for instance_id in instance_ids:
+        # 带时间戳后缀的任务目录也要清理（见 _minio_task_prefixes），
+        # 否则 rerun 时 evaluator/coordinator 可能读到旧 patch 而"假通过"。
+        for minio_prefix in _minio_task_prefixes(instance_id):
+            try:
+                proc = subprocess.run(
+                    ["docker", "exec", _CONTROLLER_CONTAINER, "mc", "rm",
+                     "--recursive", "--force", minio_prefix],
+                    capture_output=True, timeout=10,
+                )
+                if proc.returncode == 0:
+                    removed["minio"] = removed.get("minio", 0) + 1
+                    log.info("  MinIO: 已删除共享产物 %s", minio_prefix)
+            except Exception as e:
+                log.warning("  MinIO 清理跳过 %s: %s", minio_prefix, e)
 
     return removed
 
@@ -1667,22 +1911,35 @@ def run(args: argparse.Namespace):
 
     # Matrix 客户端（除非 --skip-submit）
     matrix = None
-    room_id = MATRIX_ROOM_ID
+    room_id = ""
     if not args.skip_submit and not args.index_only:
         if not MATRIX_PASSWORD:
             log.error("请设置 MATRIX_PASSWORD 环境变量（或在 agentteams.env 中配置 HICLAW_ADMIN_PASSWORD）")
             return
         try:
             matrix = MatrixClient(MATRIX_HOMESERVER, MATRIX_USER, MATRIX_PASSWORD)
-            # 自动发现房间（如果未指定 MATRIX_ROOM_ID）
-            if not room_id:
-                room_id = matrix.discover_room()
-                if not room_id:
-                    log.error("未找到 Matrix 房间，请在 Element Web 创建任务房间或设置 MATRIX_ROOM_ID")
-                    return
-                log.info("使用自动发现的房间: %s", room_id)
         except Exception as e:
             log.error("Matrix 登录失败: %s", e)
+            return
+        # 严格房间发现：只接受 controller 管理的 team room（含成员校验）。
+        # MATRIX_ROOM_ID 环境变量若与 controller teamRoomID 不一致会被忽略并告警，
+        # 避免把任务派到无路由绑定的陈旧/手工房间导致静默超时。
+        room_id = matrix.discover_room()
+        if not room_id:
+            log.error(
+                "未找到合法派单房间。请先执行 ./deploy/scripts/reset-agentteams-rooms.sh --yes 重建 team 后重试"
+            )
+            return
+        log.info(
+            "派单房间已确认: %s (成员校验通过: coordinator + %d workers)",
+            room_id, len(_WORKER_USER_IDS),
+        )
+        # 官方 lifecycle 预检：派单前经 controller 确认全部 worker 就绪，
+        # 容器 running 不代表 agent 可用（休眠/失联时容器仍在）。
+        if not MatrixClient.ensure_workers_ready():
+            log.error(
+                "worker 未全部就绪，中止派单。可执行 ./deploy/scripts/agentteams-ctl.sh agents start 后重试"
+            )
             return
 
     # ---- 按 base_commit 分组，按时间顺序处理 ----
@@ -1792,7 +2049,10 @@ def run(args: argparse.Namespace):
                 "任务已提交，等待 Agent 流水线处理（Analyzer → Fixer → Tester → Evaluator）..."
                 " 可通过 Element Web (http://127.0.0.1:18088) 观察 Agent 对话过程"
             )
-            result = wait_for_completion(matrix, room_id, inst.instance_id)
+            # 注意：wait_for_completion 的 timeout_sec 默认参数是函数定义时捕获的
+            # （=1800），不会随 _update_config 修改后的全局 TASK_TIMEOUT_SEC 变化。
+            # 必须显式传入当前全局值，否则 --timeout 参数永远不生效。
+            result = wait_for_completion(matrix, room_id, inst.instance_id, timeout_sec=TASK_TIMEOUT_SEC)
             result.duration_sec = time.time() - start_time
 
             # Step 3c: 评估 patch（SWE-bench 客观验证，维度②）
