@@ -1,0 +1,156 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daedalus.local/schemas/prd.schema.json",
+  "title": "Product Requirement Document (PRD)",
+  "description": "PO 产出的需求契约，feature / greenfield 任务机读输入。",
+  "type": "object",
+  "required": ["task_id", "task_type", "intent", "functional_requirements", "acceptance_criteria"],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "任务 ID，如 FEAT-XXXX"
+    },
+    "task_type": {
+      "type": "string",
+      "enum": ["feature", "greenfield"],
+      "description": "任务类型"
+    },
+    "intent": {
+      "type": "string",
+      "description": "一句话本质意图"
+    },
+    "functional_requirements": {
+      "type": "array",
+      "description": "功能需求列表",
+      "items": { "type": "string" }
+    },
+    "non_functional_requirements": {
+      "type": "array",
+      "description": "性能/兼容性/安全/合规约束",
+      "items": { "type": "string" }
+    },
+    "user_stories": {
+      "type": "array",
+      "description": "INVEST 用户故事，辅助 Developer/Reviewer 理解动机",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "role": { "type": "string" },
+          "goal": { "type": "string" },
+          "benefit": { "type": "string" }
+        }
+      }
+    },
+    "ambiguities": {
+      "type": "array",
+      "description": "需求歧义点及合理解释（Gate0 澄清后应无未解决歧义）",
+      "items": {
+        "type": "object",
+        "required": ["point"],
+        "properties": {
+          "point": { "type": "string" },
+          "interpretations": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "resolved_by": { "type": "string", "description": "用户最终选择的解释" }
+        }
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "description": "Given-When-Then 可测试验收标准，Tester 用例派生源",
+      "items": {
+        "type": "object",
+        "required": ["id", "given", "when", "then"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AC-[0-9]+$" },
+          "given": { "type": "string" },
+          "when": { "type": "string" },
+          "then": { "type": "string" }
+        }
+      }
+    },
+    "visual_acceptance": {
+      "type": "array",
+      "description": "视觉验收标准，前端相关任务必填",
+      "items": {
+        "type": "object",
+        "required": ["id", "check"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^VA-[0-9]+$" },
+          "check": { "type": "string", "description": "可核验的视觉描述，如对齐/间距/空态/错误态" }
+        }
+      }
+    },
+    "boundary_conditions": {
+      "type": "object",
+      "properties": {
+        "must_cover": { "type": "array", "items": { "type": "string" } },
+        "can_skip": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "out_of_scope": {
+      "type": "array",
+      "description": "显式排除项，防范围蔓延",
+      "items": { "type": "string" }
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "外部系统/前置条件耦合",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item": { "type": "string" },
+          "type": { "type": "string", "enum": ["external_system", "service", "library", "process"] },
+          "blocking": { "type": "boolean" }
+        }
+      }
+    },
+    "feature_backlog": {
+      "type": "array",
+      "description": "MoSCoW 优先级功能清单",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "priority": { "type": "string", "enum": ["Must", "Should", "Could", "Wont"] }
+        }
+      }
+    },
+    "glossary": {
+      "type": "array",
+      "description": "术语表，统一命名",
+      "items": {
+        "type": "object",
+        "properties": {
+          "term": { "type": "string" },
+          "definition": { "type": "string" }
+        }
+      }
+    },
+    "requirement_traceability": {
+      "type": "array",
+      "description": "需求 → 验收标准 → 测试用例 → 实现",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requirement_id": { "type": "string" },
+          "ac_ids": { "type": "array", "items": { "type": "string" } },
+          "test_case_ids": { "type": "array", "items": { "type": "string" } },
+          "implementation_file": { "type": "string" }
+        }
+      }
+    },
+    "greenfield": {
+      "type": "object",
+      "description": "repo 为空时必填",
+      "properties": {
+        "mvp": { "type": "array", "items": { "type": "string" } },
+        "tech_constraints": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -33,6 +33,7 @@ ensure_ecs_docker
 resolve_linux_mcp_host
 generate_db_env
 sync_mcp_code
+ensure_playwright
 deploy_db_stack
 install_agentteams
 

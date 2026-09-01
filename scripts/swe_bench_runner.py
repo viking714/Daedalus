@@ -131,12 +131,12 @@ _WORKER_CONTAINER_PREFIX = os.getenv("AGENTTEAMS_WORKER_CONTAINER_PREFIX", "agen
 _AGENTTEAMS_CLI = os.getenv("AGENTTEAMS_CLI", "agt")
 _MINIO_PREFIX_ROOT = os.getenv("AGENTTEAMS_MINIO_PREFIX", "agentteams/agentteams-storage")
 
-# Team 内期望的全部成员（coordinator = leader + 4 个 specialist worker）。
+# Team 内期望的全部成员（coordinator = leader + 6 个 specialist worker）。
 # 用于发现/校验派单房间时确认这些角色确实已加入该房间，避免把任务发到
 # controller 记录的陈旧 teamRoomID（成员不全 / 路由未绑定）导致无人响应、静默等待超时。
 # 对齐 AgentTeams 官方设计：所有角色通信都在同一个 public Team Room 中、彼此可见，
 # 派单房间必须包含 leader + 全部 worker，否则流水线无法协作。
-_WORKER_NAMES = ("analyzer", "fixer", "tester", "evaluator")
+_WORKER_NAMES = ("po", "architect", "developer", "tester", "reviewer", "ops-analyst")
 _WORKER_USER_IDS = [f"@{n}:{_hiclaw_matrix_domain}" for n in _WORKER_NAMES]
 _COORDINATOR_USER_ID = f"@coordinator:{_hiclaw_matrix_domain}"
 
@@ -871,7 +871,7 @@ class MatrixClient:
             return set()
 
     def _is_valid_team_room(self, members: set) -> bool:
-        """team room 必须含 coordinator(leader) + 全部 4 个 specialist worker。"""
+        """team room 必须含 coordinator(leader) + 全部 6 个 specialist worker。"""
         if self.dispatch_user_id not in members:
             return False
         return all(w in members for w in _WORKER_USER_IDS)
@@ -1089,7 +1089,7 @@ def _scan_room_events(matrix_client, room_id: str, since_ts_ms: int = 0,
 
 
 # coordinator 消息正文中对 worker 的文字 @ 提及（m.mentions 缺失时的兜底判据）
-_DELEGATION_RE = re.compile(r"@(analyzer|fixer|tester|evaluator)(?::|\s)")
+_DELEGATION_RE = re.compile(r"@(po|architect|developer|tester|reviewer|ops-analyst)(?::|\s)")
 
 
 def _detect_stuck_delegation(matrix_client, room_id: str, since_ts_ms: int):

@@ -21,17 +21,17 @@ In Greek mythology, **Daedalus** was the master craftsman — architect of the L
 
 Daedalus brings that spirit to software engineering. It is not a coding assistant, and not a demo. It is a **production-oriented, multi-agent organization** that mirrors the structure of a real software company: a team of specialized agents — each with a defined role, clear decision boundaries, and auditable traces — collaborating to autonomously resolve real development issues.
 
-Today's Daedalus runs a closed-loop defect-resolution team. Tomorrow, it grows into the full company: design, development, testing, operations, and continuous integration — the entire software lifecycle, end to end.
+Today's Daedalus runs a full R&D team: bug fixes, feature development (including greenfield projects), and production incident triage — three task types, one closed loop. Tomorrow, it grows into the complete software company: operations, CI/CD, and continuous integration — the entire software lifecycle, end to end.
 
 ## How It Works
 
 An issue enters. A resolved, tested, verified patch exits. Everything in between is handled by the team:
 
-<!-- Diagram source of truth: asset/how-it-works.mmd. Regenerate with: mmdc -i asset/how-it-works.mmd -o asset/how-it-works.png -b white -s 2 -->
+<!-- Diagram source of truth: asset/architecture.svg. Re-export PNG: python .qoder/skills/svg-visual-review/scripts/render_svg.py asset/architecture.svg asset/architecture.png --scale 2 -->
 
-<img src="asset/architecture.png" alt="Daedalus end-to-end flow. Left: issue sources - human chat room and Jira ticket listener. Middle: the Daedalus agent team - Manager, Analyzer, Fixer, Tester, Evaluator - cloning and pushing code on GitHub. Right: delivery - a merge-ready pull request confirmed by human review; blocked cases escalate to a human." />
+<img src="asset/architecture.png" alt="Daedalus end-to-end flow. Left: issue sources - human chat room, Jira ticket listener, and incident alerts. Middle: the Daedalus 7-role agent team - Team Leader routing feature/greenfield, bug, and incident paths through PO, Architect, Developer, Tester, Reviewer, and Ops Analyst - invoking the skills layer over MCP to databases and GitHub. Right: delivery - a merge-ready pull request confirmed by human review; blocked cases escalate to a human; AgentLoop monitoring spans the full link." />
 
-Issues arrive through the team chat room or a Jira ticket listener. The Manager clones the target repository from GitHub, the team resolves the issue, and the result ships as a merge-ready pull request — today confirmed by a human reviewer before merge. Each agent runs in its own Docker container, coordinates through the AgentTeams orchestration layer, and shares artifacts through a common workspace. Every step leaves an execution trace — auditable, replayable, and accountable.
+Issues arrive through the team chat room, a Jira ticket listener, or an incident alert. The Team Leader parses the task envelope (type: incident / bug / feature / greenfield), routes it down the matching pipeline, and the team resolves it — the result ships as a merge-ready pull request, today confirmed by a human reviewer before merge. Each agent runs in its own Docker container, coordinates through the AgentTeams orchestration layer, and shares artifacts through a common workspace. Every step leaves an execution trace — auditable, replayable, and accountable.
 
 | Layer | Technology |
 |-------|-----------|
@@ -48,13 +48,15 @@ Issues arrive through the team chat room or a Jira ticket listener. The Manager 
 
 | Role | Responsibility |
 |------|----------------|
-| **Manager** | Team lead. Receives the issue, clones the target repository, decomposes the task, routes work, and owns the final outcome. |
-| **Analyzer** | Diagnoses root cause using the knowledge graph, semantic code search, and dependency analysis. |
-| **Fixer** | The programmer. Writes the patch with full codebase context — dependency graphs, historical fixes, architectural constraints. |
-| **Tester** | Writes and runs tests against the fix. No patch advances without evidence. |
-| **Evaluator** | The quality gate. Reviews the complete work product and decides: ship it, send it back, or escalate to a human. |
+| **Team Leader** (coordinator) | Receives the task envelope, routes work, arbitrates rollback, and owns the final Verdict. |
+| **PO** | Product Owner. Runs Gate0 clarification and authors the PRD; does not write code or make technical choices. |
+| **Architect** | Bug fix: root-cause analysis. Feature / greenfield: docs-first architecture design (ADD), tech-stack rationale, and visual baseline extraction. |
+| **Developer** | Implements the fix or feature according to PRD+ADD; bug fix uses minimal patch; frontend changes consume `ui_spec` and run `visual_check` self-check. |
+| **Tester** | Derives tests from PRD independently, executes them, and runs visual regression where applicable. |
+| **Reviewer** | The senior quality gate. Reviews code/design with the strongest model, outputs `failure_class`, and blocks Verdict until quality is proven. |
+| **Ops Analyst** | Incident triage only. Diagnoses production environments, produces a diagnosis report, and routes code issues back as bugs. Never mutates production. |
 
-New roles (architect, designer, SRE, release manager) plug into the same declarative YAML templates — the org chart is configuration, not code.
+New roles plug into the same declarative YAML templates — the org chart is configuration, not code.
 
 ## Quick Start
 
@@ -78,6 +80,8 @@ First-time setup:
 ```bash
 cp deploy/config.env.example deploy/config.env   # fill in API keys / admin password
 make install                                     # install DB stack + MCP server + platform
+                                                 # (Playwright for visual-check is auto-installed;
+                                                 #  failure only degrades visual checks, never blocks install)
 ```
 
 Daily operation — bring up the entire company with one command:
@@ -95,7 +99,7 @@ There are currently two ways to verify the agent team end-to-end:
 
 **1. SWE-Bench automated runner**
 
-`scripts/swe_bench_runner.py` drives the full pipeline against real SWE-Bench cases (pallets/flask). It submits issues through the AgentTeams flow (Analyzer → Fixer → Tester → Evaluator), collects patches, and validates them with the official SWE-Bench test harness.
+`scripts/swe_bench_runner.py` drives the full pipeline against real SWE-bench cases (pallets/flask). It submits issues through the AgentTeams flow (Architect → Developer → Tester → Reviewer on the bug pipeline), collects patches, and validates them with the official SWE-bench test harness.
 
 ```bash
 # Full pipeline: index → submit → wait → verify
@@ -112,13 +116,17 @@ Other runner targets: `make swe-bench-index` (index only), `make swe-bench-reset
 
 **2. AgentTeams chat room**
 
-Open the AgentTeams chat UI and send a task directly to the **Manager** agent. The Manager will decompose the issue, route work to the team, and drive the full resolution loop interactively. This is the fastest way to test a specific bug or feature request.
+Open the AgentTeams chat UI and send a task directly to the **Team Leader** agent. It parses the task envelope, routes work to the team (bug → Architect; feature → PO; incident → Ops Analyst), and drives the full resolution loop interactively. This is the fastest way to test a specific bug, feature request, or incident report.
 
 ## Repository Layout
 
 ```
-deploy/          AgentTeams installers, worker/team templates, env samples, ops scripts
-...
+deploy/          AgentTeams installers, 7 worker/team templates, skill package (v0.2.0), ops scripts
+mcp_server/     Domain-skills MCP server (composed tools, data primitives, embeddings)
+scripts/        SWE-bench automated evaluation runner
+asset/          Architecture diagrams (SVG source + exported PNG)
+docs/           Design documents (02_详细设计: v3.0 detailed design)
+.qoder/skills/  Project skills (svg-visual-review: render-and-inspect diagram loop)
 ```
 
 ## Roadmap
@@ -126,7 +134,7 @@ deploy/          AgentTeams installers, worker/team templates, env samples, ops 
 Daedalus is production-oriented, and the roadmap reflects that:
 
 - **Jira integration** — a listener service that watches a Jira project and routes incoming issues directly to the agent team, closing the loop from ticket creation to resolved patch
-- **More roles, full lifecycle** — expand from defect resolution to the complete software company: design → development → testing → operations → CI/CD
+- **Full lifecycle deepening** — beyond the delivered bug / feature / greenfield / incident pipelines: richer release engineering, requirements management, and cross-team collaboration
 - **Engineering memory** — post-mortems and a living R&D knowledge base, so the team learns from every resolved issue instead of starting from zero
 - **Progressive delivery** — canary release with automated result confirmation
 - **Full-link observability** — AgentLoop integration for end-to-end agent monitoring
@@ -136,7 +144,6 @@ Daedalus is production-oriented, and the roadmap reflects that:
 
 - [AgentTeams (Hiclaw)](https://hiclaw.io/) — the agent orchestration foundation
 - [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) — reference implementation
-engineering can be
 
 ---
 

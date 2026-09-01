@@ -1,7 +1,7 @@
 {
   "name": "rd-defect-skills",
-  "version": "0.1.1",
-  "description": "研发缺陷闭环协同系统 AgentTeams Skills 包 —— 15 个 Skills（6 prompt-only + 9 with-scripts）",
+  "version": "0.2.0",
+  "description": "研发缺陷闭环协同系统 AgentTeams Skills 包 —— 支持 incident/bug/feature 三类任务，七角色协同，扩展 PRD/ADD/visual/ops 等技能（prompt-only + with-scripts）",
   "author": "Daedalus Team",
   "license": "Apache-2.0",
   "repository": "https://github.com/your-org/Daedalus",
@@ -23,15 +23,24 @@
       "pipeline-router",
       "module-lookup",
       "lesson-lookup",
-      "knowledge-extraction"
+      "knowledge-extraction",
+      "prd-authoring",
+      "architecture-design",
+      "ops-diagnosis",
+      "env-inventory",
+      "visual-check",
+      "test-plan"
     ]
   },
   "workers": {
-    "manager":   ["repo-index", "pipeline-router", "code-read", "bash-exec"],
-    "analyzer":  ["code-read", "bash-exec", "code-search", "impact-analysis", "root-cause-analysis", "module-lookup", "lesson-lookup"],
-    "fixer":     ["code-read", "bash-exec", "patch-generate", "multi-file-edit", "repair-planning", "lesson-lookup"],
-    "tester":    ["bash-exec", "test-run", "result-judge"],
-    "evaluator": ["code-read", "bash-exec", "impact-analysis", "result-judge", "knowledge-extraction"]
+    "team_leader":  ["repo-index", "pipeline-router", "code-read", "bash-exec"],
+    "coordinator":  ["repo-index", "pipeline-router", "code-read", "bash-exec"],
+    "po":           ["prd-authoring", "code-read", "lesson-lookup"],
+    "architect":    ["architecture-design", "code-read", "bash-exec", "code-search", "impact-analysis", "root-cause-analysis", "module-lookup", "lesson-lookup", "visual-check"],
+    "developer":    ["code-read", "bash-exec", "patch-generate", "multi-file-edit", "repair-planning", "lesson-lookup", "visual-check"],
+    "tester":       ["bash-exec", "test-run", "result-judge", "test-plan", "visual-check"],
+    "reviewer":     ["code-read", "bash-exec", "impact-analysis", "result-judge", "knowledge-extraction", "visual-check"],
+    "ops-analyst":  ["ops-diagnosis", "env-inventory", "bash-exec", "code-read", "lesson-lookup", "knowledge-extraction"]
   },
   "mcp_server": {
     "name": "code-intelligence",

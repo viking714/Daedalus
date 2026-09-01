@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daedalus.local/schemas/failure_class.schema.json",
+  "title": "Failure Classification",
+  "description": "Reviewer / Tester 报告问题时必须附带的失败分类，供 Team Leader 仲裁回退目标。",
+  "type": "object",
+  "required": ["failure_class", "evidence"],
+  "properties": {
+    "failure_class": {
+      "type": "string",
+      "enum": ["code", "design", "requirement", "environment", "visual"],
+      "description": "失败类别"
+    },
+    "evidence": {
+      "type": "string",
+      "description": "失败证据（测试输出 / diff 审查结论 / PRD 条目编号 / 复现失败记录 / 视觉检查报告）"
+    },
+    "suggested_rollback_target": {
+      "type": "string",
+      "enum": ["developer", "architect", "po", "ops-analyst"],
+      "description": "建议的回退目标角色"
+    },
+    "details": {
+      "type": "string",
+      "description": "具体问题描述，含行号/PRD 条目引用/环境检查项"
+    }
+  }
+}

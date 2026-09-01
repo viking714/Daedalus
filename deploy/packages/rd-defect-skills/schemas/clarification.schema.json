@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daedalus.local/schemas/clarification.schema.json",
+  "title": "Gate0 Clarification Record",
+  "description": "PO 在 Gate0 阶段记录的需求澄清过程。",
+  "type": "object",
+  "required": ["task_id", "rounds"],
+  "properties": {
+    "task_id": { "type": "string" },
+    "rounds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["round_num", "questions"],
+        "properties": {
+          "round_num": { "type": "integer" },
+          "questions": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "user_response": { "type": "string" },
+          "dor_passed": { "type": "boolean" }
+        }
+      }
+    },
+    "max_rounds": { "type": "integer", "default": 3 },
+    "final_outcome": {
+      "type": "string",
+      "enum": ["proceed", "escalated", "pending"]
+    }
+  }
+}

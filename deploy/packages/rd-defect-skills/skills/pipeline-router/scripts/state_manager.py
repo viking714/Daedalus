@@ -1,7 +1,7 @@
 """pipeline-router 核心脚本 — 状态管理器。
 
 从 skills.py 提取，持久化 TaskState 迁移，
-并强制闭环阈值（轮次/文件数/Token/超时）。
+并强制闭环阈值（轮次/文件数/Token/超时/单阶段重试/PO 回退）。
 """
 
 from datetime import datetime, timezone
@@ -17,14 +17,19 @@ MAX_ROUND = 3
 MAX_FILES = 5
 TOKEN_BUDGET = 100000
 TASK_TIMEOUT_MIN = 30
+INCIDENT_TIMEOUT_MIN = 15
 
-# 灰度发布阈值（对齐方案设计 v2.2 §4.5 / §4.6）
-REGRESSION_CYCLE_MAX = 3      # 回归闭环上限，超限转 escalated
-CANARY_TIMEOUT_MIN = 24 * 60  # awaiting_release 超时哨兵 TTL（默认 24h）
+# 灰度发布阈值
+REGRESSION_CYCLE_MAX = 3
+CANARY_TIMEOUT_MIN = 24 * 60
+
+# 双闸门阈值
+SINGLE_STAGE_RETRY_MAX = 2
+PO_ROLLBACK_MAX = 1
 
 
 class _StateStore:
-    """TaskState 的轻量内存实现（状态机 + 闭环阈值闸门）。"""
+    """TaskState 的轻量内存实现（状态机 + 闭环阈值闸门 + 双闸门计数）。"""
 
     def __init__(self):
         self._states = {}
@@ -69,13 +74,21 @@ class _StateStore:
 _STATE_STORE = _StateStore()
 
 
-def manage_state(task_id: str, from_stage: str = None,
-                 to_stage: str = None, owner_agent: str = None,
-                 reason: str = "", round_num: int = None,
-                 modified_files_count: int = None,
-                 tokens_used: int = None,
-                 regression_cycle_count: int = None) -> dict:
-    """TaskState 迁移 + 闭环阈值闸门。
+def manage_state(
+    task_id: str,
+    from_stage: str = None,
+    to_stage: str = None,
+    owner_agent: str = None,
+    reason: str = "",
+    round_num: int = None,
+    modified_files_count: int = None,
+    tokens_used: int = None,
+    regression_cycle_count: int = None,
+    stage_retry_count: int = None,
+    po_rollback_count: int = None,
+    task_type: str = None,
+) -> dict:
+    """TaskState 迁移 + 闭环阈值闸门 + 双闸门计数。
 
     Args:
         task_id: 任务 ID（必填）
@@ -86,7 +99,10 @@ def manage_state(task_id: str, from_stage: str = None,
         round_num: 当前轮次
         modified_files_count: 修改文件数
         tokens_used: 已使用 token 数
-        regression_cycle_count: 灰度回归次数（超限转 escalated）
+        regression_cycle_count: 灰度回归次数
+        stage_retry_count: 单阶段重试次数
+        po_rollback_count: 回退至 PO 的次数
+        task_type: incident / bug / feature
 
     Returns:
         {accepted, state_version, state, compress?, decision?}
@@ -113,6 +129,20 @@ def manage_state(task_id: str, from_stage: str = None,
             "reason": f"modified files {modified_files_count} exceeds budget {MAX_FILES}",
         }
 
+    # 双闸门
+    if stage_retry_count is not None and stage_retry_count > SINGLE_STAGE_RETRY_MAX:
+        return {
+            "accepted": False,
+            "decision": "rollback_one_stage",
+            "reason": f"stage retry {stage_retry_count} exceeds {SINGLE_STAGE_RETRY_MAX}",
+        }
+    if po_rollback_count is not None and po_rollback_count > PO_ROLLBACK_MAX:
+        return {
+            "accepted": False,
+            "decision": "escalated",
+            "reason": f"PO rollback {po_rollback_count} exceeds {PO_ROLLBACK_MAX}",
+        }
+
     compress = False
     if tokens_used is not None and tokens_used > TOKEN_BUDGET:
         compress = True
@@ -123,17 +153,23 @@ def manage_state(task_id: str, from_stage: str = None,
     if st and st.get("started_at"):
         started = datetime.fromisoformat(st["started_at"])
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-        if elapsed > TASK_TIMEOUT_MIN * 60:
+        timeout_min = INCIDENT_TIMEOUT_MIN if task_type == "incident" else TASK_TIMEOUT_MIN
+        if elapsed > timeout_min * 60:
             return {"accepted": False, "decision": "escalated", "reason": "task timeout"}
     if not st:
         extra["started_at"] = datetime.now(timezone.utc).isoformat()
 
-    # awaiting_release 记录进入时间，供 canary_watchdog 判定 TTL
+    # awaiting_release 记录进入时间
     if to_stage == "awaiting_release":
         extra["release_entered_at"] = datetime.now(timezone.utc).isoformat()
-    # 回归次数回灌（由 release_decision 决策回滚时递增并携带）
+    # 回归次数回灌
     if regression_cycle_count is not None:
         extra["regression_cycle_count"] = regression_cycle_count
+    # 双闸门计数回灌
+    if stage_retry_count is not None:
+        extra["stage_retry_count"] = stage_retry_count
+    if po_rollback_count is not None:
+        extra["po_rollback_count"] = po_rollback_count
 
     result = _STATE_STORE.transition(
         task_id=task_id,

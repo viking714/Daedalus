@@ -22,12 +22,12 @@
   下一个 Worker 再拉取更新后的仓库/产物继续工作。
 
 角色架构（对齐补充设计文档 v1.2 / 方案设计 v2.2）：
-- Manager（Orchestrator）：task_router / state_manager / handoff_manager
-- Analyzer：semantic_search / kg_query / module_lookup / repo_indexer / context_packer / root_cause_analyzer
+- Team Leader（Orchestrator）：task_router / state_manager / handoff_manager
+- Architect：semantic_search / kg_query / module_lookup / repo_indexer / context_packer / root_cause_analyzer
   （注：hybrid_search 为 mcp_primitives 层的共享服务，由 semantic_search 复用，不在此重复注册）
-- Fixer：repair_planner / risk_gate
+- Developer：repair_planner / risk_gate
 - Tester：（result_judge 已转为 prompt-only Skill，由 Worker runtime 直接执行，不在此注册）
-- Evaluator：dep_graph_analyzer / contract_checker / knowledge_extraction
+- Reviewer：dep_graph_analyzer / contract_checker / knowledge_extraction
 """
 
 import os
@@ -101,16 +101,19 @@ TOKEN_BUDGET = 100000
 REGRESSION_CYCLE_MAX = 3      # 回归闭环上限，超限转 escalated
 CANARY_TIMEOUT_MIN = 24 * 60  # awaiting_release 超时哨兵 TTL（默认 24h）
 
-# 流水线阶段 -> 负责 Agent（对齐方案设计 v2.2 §2.2 完整状态机）
-# received → analyzing → fixing → testing → evaluating → awaiting_release → resolved / escalated
-_PIPELINE: List[Tuple[str, str]] = [
-    ("received", "manager"),
-    ("analyzing", "analyzer"),
-    ("fixing", "fixer"),
-    ("testing", "tester"),
-    ("evaluating", "evaluator"),
-    ("awaiting_release", "manager"),
-]
+# 从技能包路由脚本导入单一 truth；失败时回退到本地简化表
+try:
+    _skills_router_path = os.path.join(
+        os.path.dirname(__file__), "..", "deploy", "packages", "rd-defect-skills",
+        "skills", "pipeline-router", "scripts"
+    )
+    _skills_router_path = os.path.abspath(_skills_router_path)
+    if _skills_router_path not in sys.path:
+        sys.path.insert(0, _skills_router_path)
+    from task_router import _PIPELINES as _SKILL_PIPELINES
+except Exception:  # pragma: no cover
+    _SKILL_PIPELINES = None
+
 
 # 终态集合（任务仅在这些状态真正结束）
 _TERMINAL_STAGES = {"resolved", "escalated"}
@@ -134,7 +137,7 @@ def _rand(prefix: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-@register("task_router", "Manager", "根据任务与当前阶段路由；达最大轮次转人工移交，awaiting_release 后由灰度事件驱动")
+@register("task_router", "Team Leader", "根据任务与当前阶段路由；达最大轮次转人工移交，awaiting_release 后由灰度事件驱动")
 def skill_task_router(payload: dict) -> dict:
     src = payload.get("source") or {}
     current_stage = payload.get("current_stage") or (src.get("stage") if isinstance(src, dict) else None)
@@ -148,14 +151,43 @@ def skill_task_router(payload: dict) -> dict:
     if current_stage in _TERMINAL_STAGES:
         return {"next_agent": None, "next_stage": current_stage, "reason": "terminal stage"}
 
+    # 选择流水线
+    task_type = payload.get("task_type") or src.get("task_type") or "bug"
+    greenfield = bool(payload.get("greenfield") or src.get("greenfield"))
+    failure_class = payload.get("failure_class") or src.get("failure_class")
+
+    # 回退仲裁
+    from task_router import _FAILURE_ROLLBACK as _fb
+    if failure_class and failure_class in _fb:
+        target_stage, target_agent = _fb[failure_class]
+        return {"next_agent": target_agent, "next_stage": target_stage, "reason": f"rollback by failure_class={failure_class}"}
+
     # 入口：received / 无状态 → analyzing
     if not current_stage or current_stage == "received":
-        return {"next_agent": "analyzer", "next_stage": "analyzing", "reason": "entry from received"}
+        if task_type == "incident":
+            return {"next_agent": "ops-analyst", "next_stage": "ops_diagnosing", "reason": "entry from received (incident)"}
+        return {"next_agent": "architect", "next_stage": "analyzing", "reason": "entry from received"}
 
     # 常规流水线推进
-    idx = next((i for i, (s, _) in enumerate(_PIPELINE) if s == current_stage), None)
-    if idx is not None and idx + 1 < len(_PIPELINE):
-        nxt_stage, nxt_agent = _PIPELINE[idx + 1]
+    if _SKILL_PIPELINES:
+        if task_type == "incident":
+            pipeline = _SKILL_PIPELINES["incident"]
+        elif task_type == "bug":
+            pipeline = _SKILL_PIPELINES["bug"]
+        else:
+            pipeline = _SKILL_PIPELINES["greenfield"] if greenfield else _SKILL_PIPELINES["feature"]
+    else:
+        pipeline = [
+            ("received", "manager"),
+            ("analyzing", "architect"),
+            ("fixing", "developer"),
+            ("testing", "tester"),
+            ("evaluating", "reviewer"),
+            ("awaiting_release", "manager"),
+        ]
+    idx = next((i for i, (s, _) in enumerate(pipeline) if s == current_stage), None)
+    if idx is not None and idx + 1 < len(pipeline):
+        nxt_stage, nxt_agent = pipeline[idx + 1]
         return {"next_agent": nxt_agent, "next_stage": nxt_stage, "reason": "pipeline advance"}
 
     # awaiting_release 是流水线最后一段，之后由灰度结果事件驱动（release_decision），不自动推进
@@ -199,7 +231,7 @@ class _StateStore:
 _STATE_STORE = _StateStore()
 
 
-@register("state_manager", "Manager", "持久化 TaskState 迁移，并强制闭环阈值（轮次/文件数/Token/超时/回归次数）")
+@register("state_manager", "Team Leader", "持久化 TaskState 迁移，并强制闭环阈值（轮次/文件数/Token/超时/回归次数）")
 def skill_state_manager(payload: dict) -> dict:
     task_id = payload.get("task_id")
     if not task_id:
@@ -254,7 +286,7 @@ def skill_state_manager(payload: dict) -> dict:
     return result
 
 
-@register("handoff_manager", "Manager", "生成人工移交包（达到阈值/高风险时）")
+@register("handoff_manager", "Team Leader", "生成人工移交包（达到阈值/高风险时）")
 def skill_handoff_manager(payload: dict) -> dict:
     task_id = payload.get("task_id") or _rand("TASK")
     return {
@@ -277,7 +309,7 @@ def skill_handoff_manager(payload: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-@register("release_plan_generator", "Manager", "生成灰度发布计划 release_plan.json（对齐方案设计 §4.2 意图声明）")
+@register("release_plan_generator", "Team Leader", "生成灰度发布计划 release_plan.json（对齐方案设计 §4.2 意图声明）")
 def skill_release_plan_generator(payload: dict) -> dict:
     """Evaluator 裁定通过后，Manager 生成 release_plan.json 作为灰度发布意图声明。
 
@@ -308,7 +340,7 @@ def skill_release_plan_generator(payload: dict) -> dict:
     }
 
 
-@register("release_decision", "Manager", "读取 confirmation_report.json 决策关单/回滚（对齐方案设计 §4.4/§4.5）")
+@register("release_decision", "Team Leader", "读取 confirmation_report.json 决策关单/回滚（对齐方案设计 §4.4/§4.5）")
 def skill_release_decision(payload: dict) -> dict:
     """灰度结果确认闭环：消费 confirmation_report.json 决策。
 
@@ -354,17 +386,29 @@ def skill_release_decision(payload: dict) -> dict:
             "reason": f"canary FAIL and regression cycle {regression_cycle} exceeds max {REGRESSION_CYCLE_MAX}",
         }
 
+    # canary FAIL：按 failure_class 路由回退目标
+    failure_class = confirmation.get("failure_class") if isinstance(confirmation, dict) else None
+    if failure_class in ("requirement",):
+        target_stage, target_agent = "prd_drafting", "po"
+    elif failure_class in ("design",):
+        target_stage, target_agent = "designing", "architect"
+    elif failure_class in ("environment",):
+        target_stage, target_agent = "ops_diagnosing", "ops-analyst"
+    else:
+        target_stage, target_agent = "analyzing", "architect"
+
     return {
         "decision": "rollback",
-        "action": "feedback_to_analyzer",
-        "next_stage": "analyzing",
+        "action": "feedback_to_target",
+        "rollback_target": target_agent,
+        "next_stage": target_stage,
         "regression_cycle_count": regression_cycle,
         "feedback": confirmation if isinstance(confirmation, dict) else {"result": confirmation},
-        "reason": f"canary FAIL; rollback to analyzing (regression cycle {regression_cycle}/{REGRESSION_CYCLE_MAX})",
+        "reason": f"canary FAIL; rollback to {target_agent} (regression cycle {regression_cycle}/{REGRESSION_CYCLE_MAX})",
     }
 
 
-@register("canary_watchdog", "Manager", "awaiting_release 超时哨兵（对齐方案设计 §4.6，默认 24h TTL）")
+@register("canary_watchdog", "Team Leader", "awaiting_release 超时哨兵（对齐方案设计 §4.6，默认 24h TTL）")
 def skill_canary_watchdog(payload: dict) -> dict:
     """巡检 awaiting_release 是否超时（CI 静默失败 / webhook 丢失 / 人工忘 merge）。
 
@@ -409,7 +453,7 @@ def skill_canary_watchdog(payload: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-@register("repo_indexer", "Analyzer", "增量代码索引：tree-sitter 切分→嵌入→写入 pgvector/Neo4j/Meili（单命名空间 + 增量更新）")
+@register("repo_indexer", "Architect", "增量代码索引：tree-sitter 切分→嵌入→写入 pgvector/Neo4j/Meili（单命名空间 + 增量更新）")
 def skill_repo_indexer(payload: dict) -> dict:
     """增量索引：单命名空间 per repo，Redis 追踪 file hash，只更新变更文件。
 
@@ -675,7 +719,7 @@ def skill_repo_indexer(payload: dict) -> dict:
         return {"status": "error", "reason": str(e)}
 
 
-@register("context_packer", "Analyzer", "将检索结果打包为上下文（拼接结构化块）")
+@register("context_packer", "Architect", "将检索结果打包为上下文（拼接结构化块）")
 def skill_context_packer(payload: dict) -> dict:
     chunks = payload.get("chunks", [])
     issue = payload.get("issue", {})
@@ -693,7 +737,7 @@ def skill_context_packer(payload: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-@register("root_cause_analyzer", "Analyzer", "根因分析：结合 Neo4j 依赖图与代码上下文（降级为启发式）")
+@register("root_cause_analyzer", "Architect", "根因分析：结合 Neo4j 依赖图与代码上下文（降级为启发式）")
 def skill_root_cause_analyzer(payload: dict) -> dict:
     ctx = payload.get("context_pack", "")
     suspect = payload.get("suspect_symbol") or ""
@@ -722,7 +766,7 @@ def skill_root_cause_analyzer(payload: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-@register("repair_planner", "Fixer", "生成修复计划：受 impact 影响面约束，单轮不超过 5 文件")
+@register("repair_planner", "Developer", "生成修复计划：受 impact 影响面约束，单轮不超过 5 文件")
 def skill_repair_planner(payload: dict) -> dict:
     root_cause = payload.get("root_cause", {})
     max_files = int(payload.get("max_files_per_round", MAX_FILES))
@@ -743,7 +787,7 @@ def skill_repair_planner(payload: dict) -> dict:
     }
 
 
-@register("risk_gate", "Fixer", "风险闸门：默认拒绝原则，敏感模块/高危需人工审批")
+@register("risk_gate", "Developer", "风险闸门：默认拒绝原则，敏感模块/高危需人工审批")
 def skill_risk_gate(payload: dict) -> dict:
     risk_level = (payload.get("risk_level") or "low").lower()
     touches = payload.get("touches", []) or []
@@ -779,7 +823,7 @@ def skill_risk_gate(payload: dict) -> dict:
 _SIGNATURE_RE = re.compile(r"^\s*(def |public |private |protected |function |=>|\w+\s*\([^)]*\)\s*\{?)\s*\w+")
 
 
-@register("dep_graph_analyzer", "Evaluator", "依赖图影响分析：基于 Neo4j CALLS/IMPORTS 子图估算真实波及范围与风险等级")
+@register("dep_graph_analyzer", "Reviewer", "依赖图影响分析：基于 Neo4j CALLS/IMPORTS 子图估算真实波及范围与风险等级")
 def skill_dep_graph_analyzer(payload: dict) -> dict:
     changed_files = payload.get("changed_files", []) or []
     patch_text = payload.get("patch_text")
@@ -833,7 +877,7 @@ def skill_dep_graph_analyzer(payload: dict) -> dict:
     }
 
 
-@register("contract_checker", "Evaluator", "契约核查：检测补丁是否改动既有接口/函数签名")
+@register("contract_checker", "Reviewer", "契约核查：检测补丁是否改动既有接口/函数签名")
 def skill_contract_checker(payload: dict) -> dict:
     patch_text = payload.get("patch_text")
     changed_files = payload.get("changed_files", []) or []
@@ -888,7 +932,7 @@ def skill_result_judge(payload: dict) -> dict:
     }
 
 
-@register("knowledge_extraction", "Evaluator", "知识沉淀：从根因/裁定中抽取经验并写入 lessons 表（带去重合并）")
+@register("knowledge_extraction", "Reviewer", "知识沉淀：从根因/裁定中抽取经验并写入 lessons 表（带去重合并）")
 def skill_knowledge_extraction(payload: dict) -> dict:
     """经验抽取技能——对齐方案设计 v2.2 §5.3，Evaluator 裁定完成后调用。
 
@@ -997,7 +1041,7 @@ def _parse_patch_text(patch_text: str):
 # --------------------------------------------------------------------------- #
 
 
-@register("semantic_search", "Analyzer", "语义检索：自然语言查询代码库，返回最相关的代码片段（三库融合工具接口）")
+@register("semantic_search", "Architect", "语义检索：自然语言查询代码库，返回最相关的代码片段（三库融合工具接口）")
 def skill_semantic_search(payload: dict) -> dict:
     """语义搜索技能——本质上是 hybrid_search 的别名，但使用设计文档标准命名。
 
@@ -1028,7 +1072,7 @@ def skill_semantic_search(payload: dict) -> dict:
     return {"results": results, "graph_expansion": result.get("graph_expansion", [])}
 
 
-@register("kg_query", "Analyzer", "知识图谱查询：查询代码结构关系（调用方/被调方/模块伙伴/测试映射）")
+@register("kg_query", "Architect", "知识图谱查询：查询代码结构关系（调用方/被调方/模块伙伴/测试映射）")
 def skill_kg_query(payload: dict) -> dict:
     """查询代码知识图谱的结构关系。
 
@@ -1070,7 +1114,7 @@ def skill_kg_query(payload: dict) -> dict:
         return {"status": "error", "reason": str(e)}
 
 
-@register("module_lookup", "Analyzer", "模块查找：将领域概念映射到负责模块和关键文件")
+@register("module_lookup", "Architect", "模块查找：将领域概念映射到负责模块和关键文件")
 def skill_module_lookup(payload: dict) -> dict:
     """将领域概念映射到负责模块和关键文件。
 

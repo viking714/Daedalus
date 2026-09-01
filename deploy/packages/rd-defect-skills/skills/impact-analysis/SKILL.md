@@ -8,14 +8,14 @@ description: impact-analysis Skill - impact-analysis
 AgentTeams Skill — with-scripts（核心脚本：`scripts/dep_graph.py` / `scripts/contract_check.py`）
 
 ## 角色
-Analyzer (主用) / Evaluator (主用)
+Architect (主用) / Reviewer (主用)
 
 ## 功能
-依赖图分析与契约检查。Analyzer 评估影响面、Evaluator 审查一致性时使用。
+依赖图分析与契约检查。Architect 评估影响面、Reviewer 审查一致性时使用。
 
 ## 使用场景
-- Analyzer 完成根因定位后评估影响面
-- Evaluator 审查 patch 时确认波及范围
+- Architect 完成根因定位后评估影响面
+- Reviewer 审查 patch 时确认波及范围
 
 ## 输入参数
 | 参数 | 必填 | 说明 |
@@ -31,7 +31,7 @@ Analyzer (主用) / Evaluator (主用)
 影响面统计（`affected_files` / `affected_functions` / `affected_callers`）、契约违规列表、风险等级（L0–L3）。
 
 ## 调用条件
-Analyzer 完成根因定位后、Fixer 制定修复方案前；Evaluator 审查 patch 时再次确认影响面。
+Architect 完成根因定位后、Developer 制定修复方案前；Reviewer 审查 patch 时再次确认影响面。
 
 ## 依赖 MCP 原语
 `neo4j_impact_stats` / `neo4j_dep_subgraph` / `neo4j_symbol_lookup` / `ast_parse_file`
@@ -51,4 +51,4 @@ Analyzer 完成根因定位后、Fixer 制定修复方案前；Evaluator 审查 
 - 契约解析失败 → 跳过该模块并记录警告
 
 ## 复用价值
-**高**。Analyzer / Evaluator 共用；可推广到"代码变更风险评估"通用场景。
+**高**。Architect / Reviewer 共用；可推广到"代码变更风险评估"通用场景。

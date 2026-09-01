@@ -6,18 +6,22 @@ metadata:
     app.kubernetes.io/name: rd-defect-closed-loop
 spec:
   displayName: 研发缺陷闭环协同团队
-  description: SWE-bench defect repair closed-loop team
+  description: SWE-bench defect repair closed-loop team (incident/bug/feature/greenfield)
   peerMentions: true
   leader:
     name: coordinator
   workerMembers:
     - name: coordinator
       role: team_leader
-    - name: analyzer
+    - name: po
       role: worker
-    - name: fixer
+    - name: architect
+      role: worker
+    - name: developer
       role: worker
     - name: tester
       role: worker
-    - name: evaluator
+    - name: reviewer
+      role: worker
+    - name: ops-analyst
       role: worker

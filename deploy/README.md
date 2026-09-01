@@ -14,7 +14,7 @@ deploy/
 │   └── lib/common.sh    # 共享库（配置加载、DB 栈、MCP、平台安装与资源注册）
 ├── install/
 │   └── agentteams-install.sh  # vendored 官方安装器（v1.2.3，AGENTTEAMS_* 契约）
-├── workers/             # Worker 角色定义（5 个角色 YAML）
+├── workers/             # Worker 角色定义（7 个角色 YAML）
 ├── teams/               # Team / Manager / Human 资源模板
 ├── packages/            # 领域技能包源码与构建产物（rd-defect-skills）
 ├── db/                  # 数据库栈编排（docker-compose.db.yml）
@@ -74,11 +74,13 @@ bash deploy/scripts/run.sh start | stop | restart | status
 
 | 角色 | 文件 | 职责 |
 |------|------|------|
-| Coordinator | `workers/coordinator.yaml` | Team Leader：流水线调度（analyze→fix→test→evaluate） |
-| Analyzer | `workers/analyzer.yaml` | 根因分析、代码检索、上下文构建 |
-| Fixer | `workers/fixer.yaml` | 修复规划、补丁生成、多文件编辑 |
-| Tester | `workers/tester.yaml` | 测试执行、结果裁定 |
-| Evaluator | `workers/evaluator.yaml` | 波及评估、签名检查、知识挖掘 |
+| Team Leader (coordinator) | `workers/coordinator.yaml` | 任务信封解析、流水线路由、回退仲裁、最终 Verdict |
+| PO | `workers/po.yaml` | Gate0 需求澄清、PRD 产出 |
+| Architect | `workers/architect.yaml` | Bug 根因分析；feature/greenfield 架构设计（ADD） |
+| Developer | `workers/developer.yaml` | 代码实现、补丁生成、前端视觉自检 |
+| Tester | `workers/tester.yaml` | 测试设计前置、测试执行、视觉回归 |
+| Reviewer | `workers/reviewer.yaml` | 质量门禁、failure_class 输出、经验沉淀 |
+| Ops Analyst | `workers/ops-analyst.yaml` | incident 诊断、环境资产读取、转 bug 分流 |
 
 `register_resources` 依次 `agt apply` workers/*.yaml 与 teams/*.yaml，并唤醒全部 Worker。
 MinIO 共享存储由平台内置（controller 注入 `agentteams` alias 的 mc CLI），worker yaml 不再声明凭据。

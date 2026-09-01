@@ -8,16 +8,16 @@ description: bash-exec Skill - bash-exec
 AgentTeams Skill — prompt-only
 
 ## 角色
-Manager (主用) / Analyzer (主用) / Fixer (主用) / Tester (主用) / Evaluator (主用)
+Manager (主用) / Architect (主用) / Developer (主用) / Tester (主用) / Reviewer (主用)
 
 ## 功能
 安全执行 bash 命令，白名单机制。
 
 ## 使用场景
 - Tester 执行 pytest
-- Fixer 跑 git diff
+- Developer 跑 git diff
 - Manager 调外部脚本
-- Analyzer 运行复现脚本
+- Architect 运行复现脚本
 
 ## 输入参数
 | 参数 | 必填 | 说明 |

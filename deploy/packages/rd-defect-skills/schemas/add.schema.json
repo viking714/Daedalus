@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daedalus.local/schemas/add.schema.json",
+  "title": "Architecture Design Document (ADD)",
+  "description": "Architect 产出的架构设计契约，feature / greenfield 任务机读输入。",
+  "type": "object",
+  "required": ["task_id", "design_inputs", "tech_stack", "design_patterns", "dependencies_rationale", "module_design", "change_plan"],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "任务 ID，如 FEAT-XXXX"
+    },
+    "design_inputs": {
+      "type": "object",
+      "description": "设计输入与文档对齐",
+      "properties": {
+        "docs_referenced": { "type": "array", "items": { "type": "string" } },
+        "code_analyzed": { "type": "array", "items": { "type": "string" } },
+        "docs_code_divergence": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tech_stack": {
+      "type": "object",
+      "description": "技术选型记录",
+      "properties": {
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["component", "selected", "rationale"],
+            "properties": {
+              "component": { "type": "string" },
+              "selected": { "type": "string" },
+              "rationale": { "type": "string" },
+              "alternatives_rejected": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "design_patterns": {
+      "type": "array",
+      "description": "显式命名的 GOF/架构模式及解决的问题",
+      "items": {
+        "type": "object",
+        "required": ["pattern", "applied_in", "solves"],
+        "properties": {
+          "pattern": { "type": "string" },
+          "applied_in": { "type": "string" },
+          "solves": { "type": "string" }
+        }
+      }
+    },
+    "dependencies_rationale": {
+      "type": "array",
+      "description": "第三方依赖选型理由与风险",
+      "items": {
+        "type": "object",
+        "required": ["name", "category", "selected", "reason"],
+        "properties": {
+          "name": { "type": "string" },
+          "category": { "type": "string", "enum": ["mainstream", "niche", "self-built"] },
+          "selected": { "type": "string" },
+          "reason": { "type": "string" },
+          "alternatives_considered": { "type": "string" },
+          "risk": { "type": "string", "enum": ["低", "中", "高"] }
+        }
+      }
+    },
+    "ui_spec": {
+      "type": "object",
+      "description": "前端相关任务必填；引用成熟设计系统，禁止自创。",
+      "properties": {
+        "design_tokens": {
+          "type": "object",
+          "required": ["source"],
+          "properties": {
+            "source": { "type": "string", "enum": ["antd", "material-design-3", "other"] },
+            "palette": { "type": "array", "items": { "type": "string" } },
+            "typography": { "type": "array", "items": { "type": "string" } },
+            "spacing": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "component_mapping": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "interaction_states": {
+          "type": "array",
+          "description": "每页 × empty/loading/error/boundary",
+          "items": { "type": "string" }
+        },
+        "layout": {
+          "type": "object",
+          "properties": {
+            "grid": { "type": "string" },
+            "breakpoints": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "baseline_sources": {
+          "type": "array",
+          "description": "Architect 用 visual_check 提取的存量页面基线路径",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "module_design": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["module", "responsibility"],
+        "properties": {
+          "module": { "type": "string" },
+          "responsibility": { "type": "string" },
+          "public_interface": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "data_model": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "api_contracts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "change_plan": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "change", "risk"],
+        "properties": {
+          "file": { "type": "string" },
+          "change": { "type": "string", "enum": ["new", "modify", "delete"] },
+          "risk": { "type": "string", "enum": ["低", "中", "高"] }
+        }
+      }
+    },
+    "rollout_risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "open_questions": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

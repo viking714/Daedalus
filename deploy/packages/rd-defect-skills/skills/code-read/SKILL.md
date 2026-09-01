@@ -8,15 +8,15 @@ description: code-read Skill - code-read
 AgentTeams Skill — prompt-only
 
 ## 角色
-Manager (备用) / Analyzer (主用) / Fixer (主用) / Evaluator (主用)
+Manager (备用) / Architect (主用) / Developer (主用) / Reviewer (主用)
 
 ## 功能
 读取代码文件，支持指定行范围与上下文窗口。
 
 ## 使用场景
-- Analyzer 阅读源码确认根因假设
-- Fixer 读取待修改文件
-- Evaluator 审查 diff 时对照原始代码
+- Architect 阅读源码确认根因假设
+- Developer 读取待修改文件
+- Reviewer 审查 diff 时对照原始代码
 
 ## 输入参数
 | 参数 | 必填 | 说明 |
@@ -49,4 +49,4 @@ Worker 原生工具 `file r/w`（只读模式）。
 - 不返回 `.env` / `secrets/` 等敏感目录
 
 ## 复用价值
-**高**。Manager/Analyzer/Fixer/Evaluator 四个角色均使用。
+**高**。Manager/Architect/Developer/Reviewer 四个角色均使用。

@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daedalus.local/schemas/test_plan.schema.json",
+  "title": "Test Plan",
+  "description": "Tester 从 PRD 验收标准独立派生的测试计划。",
+  "type": "object",
+  "required": ["task_id", "cases"],
+  "properties": {
+    "task_id": { "type": "string" },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source_ac", "title", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "source_ac": { "type": "string", "description": "来源的验收标准 ID" },
+          "title": { "type": "string" },
+          "type": { "type": "string", "enum": ["functional", "visual", "regression", "boundary"] },
+          "steps": { "type": "array", "items": { "type": "string" } },
+          "expected": { "type": "string" },
+          "automation": { "type": "string", "enum": ["automated", "manual", "hybrid"] }
+        }
+      }
+    },
+    "visual_regression": {
+      "type": "array",
+      "description": "来自 PRD.visual_acceptance 的视觉回归用例",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "source_va": { "type": "string" },
+          "baseline_snapshot": { "type": "string" }
+        }
+      }
+    }
+  }
+}

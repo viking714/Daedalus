@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://daedalus.local/schemas/diagnosis.schema.json",
+  "title": "Incident Diagnosis Report",
+  "description": "Ops Analyst 产出的 incident 诊断报告。",
+  "type": "object",
+  "required": ["task_id", "env", "symptom", "classification", "recommended_action"],
+  "properties": {
+    "task_id": { "type": "string" },
+    "env": { "type": "string", "description": "目标环境标识，如 prod" },
+    "symptom": { "type": "string", "description": "症状一句话复述" },
+    "env_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["item", "result", "evidence"],
+        "properties": {
+          "item": { "type": "string" },
+          "result": { "type": "string" },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+    "lessons_hit": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lesson_id": { "type": "string" },
+          "similarity": { "type": "number" },
+          "applied": { "type": "boolean" }
+        }
+      }
+    },
+    "classification": {
+      "type": "string",
+      "enum": ["env", "code", "data", "unknown"],
+      "description": "incident 分类"
+    },
+    "suspected_cause": { "type": "string" },
+    "recommended_action": {
+      "type": "object",
+      "required": ["level", "steps"],
+      "properties": {
+        "level": { "type": "string", "enum": ["L0", "L1", "L2"] },
+        "steps": { "type": "array", "items": { "type": "string" } },
+        "rollback_point": { "type": "string" },
+        "references": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "excluded_for_dev": {
+      "type": "array",
+      "description": "已排除的环境变量清单，供 Architect 继承",
+      "items": { "type": "string" }
+    },
+    "sensitive_data_redacted": {
+      "type": "boolean",
+      "description": "诊断报告已脱敏"
+    }
+  }
+}

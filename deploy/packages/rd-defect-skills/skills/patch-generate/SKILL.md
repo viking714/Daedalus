@@ -8,13 +8,13 @@ description: patch-generate Skill - patch-generate
 AgentTeams Skill — prompt-only
 
 ## 角色
-Fixer (主用)
+Developer (主用)
 
 ## 功能
 生成统一格式 diff。
 
 ## 使用场景
-Fixer 完成多文件编辑后，汇总产出 `fix.diff`。
+Developer 完成多文件编辑后，汇总产出 `fix.diff`。
 
 ## 输入参数
 | 参数 | 必填 | 说明 |
@@ -27,7 +27,7 @@ Fixer 完成多文件编辑后，汇总产出 `fix.diff`。
 unified diff 格式字符串（`--- a/...` / `+++ b/...` 头），写入 `fix.diff` 文件。
 
 ## 调用条件
-Fixer 完成所有编辑后、状态推进到 `testing` 之前调用。
+Developer 完成所有编辑后、状态推进到 `testing` 之前调用。
 
 ## 依赖工具/系统
 Worker 原生工具 `git diff`。
@@ -46,4 +46,4 @@ Worker 原生工具 `git diff`。
 - 不暴露敏感信息（如密钥、token）
 
 ## 复用价值
-**中**。主要 Fixer 使用；任何需要产出"代码变更"产物的场景可复用。
+**中**。主要 Developer 使用；任何需要产出"代码变更"产物的场景可复用。

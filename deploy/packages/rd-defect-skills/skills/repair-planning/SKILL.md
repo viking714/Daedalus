@@ -8,14 +8,14 @@ description: repair-planning Skill - repair-planning
 AgentTeams Skill — with-scripts（核心脚本：`scripts/repair_plan.py` / `scripts/risk_gate.py`）
 
 ## 角色
-Fixer (主用)
+Developer (主用)
 
 ## 功能
-修复方案规划与风险闸门。Fixer 在编辑前制定具体方案，并通过风险闸门决定是否执行。
+修复方案规划与风险闸门。Developer 在编辑前制定具体方案，并通过风险闸门决定是否执行。
 **先识别输入类型**：根因报告（Bug 修复）→ 精准修复方案；需求规格（Feature Request）→ 稳健实现方案（覆盖多解释）。
 
 ## 使用场景
-Fixer 进入 `fixing` 状态、收到 Analyzer 产出（根因报告 或 需求规格）后、实际编辑之前。
+Developer 进入 `fixing` 状态、收到 Architect 产出（根因报告 或 需求规格）后、实际编辑之前。
 
 ## 输入参数
 | 参数 | 必填 | 说明 |
@@ -37,7 +37,7 @@ Fixer 进入 `fixing` 状态、收到 Analyzer 产出（根因报告 或 需求�
 - **覆盖多种解释**：需求有歧义时，实现能覆盖所有合理解释的稳健版本
 
 ## 调用条件
-Fixer 处于 `fixing` 状态、Analyzer 已输出根因报告、Fixer 未做实际编辑之前。
+Developer 处于 `fixing` 状态、Architect 已输出根因报告、Developer 未做实际编辑之前。
 
 ## 依赖 MCP 原语
 `neo4j_impact_stats`（再确认影响面）
@@ -56,4 +56,4 @@ Fixer 处于 `fixing` 状态、Analyzer 已输出根因报告、Fixer 未做实�
 - `risk_gate` 与 `impact-analysis` 结论矛盾 → 保守侧生效
 
 ## 复用价值
-**中**。主要 Fixer 使用；可推广到"代码变更方案设计"通用场景。
+**中**。主要 Developer 使用；可推广到"代码变更方案设计"通用场景。

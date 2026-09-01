@@ -29,7 +29,7 @@ AGENTTEAMS_INSTALLER_URL="https://raw.githubusercontent.com/agentscope-ai/AgentT
 CONTROLLER="agentteams-controller"
 MANAGER="agentteams-manager"
 DASHBOARD="agentteams-dashboard"
-RD_WORKERS=(coordinator analyzer fixer tester evaluator)
+RD_WORKERS=(coordinator po architect developer tester reviewer ops-analyst)
 
 # ---- 颜色 ----
 if [[ -t 1 ]]; then
@@ -214,6 +214,44 @@ require_python3() {
     fail "未找到 python3：请先安装 python3（macOS: xcode-select --install；Linux: 对应发行版包管理器）"
   fi
   exit 1
+}
+
+# ============================================================================
+# Playwright 依赖（visual-check 技能需要）
+# ----------------------------------------------------------------------------
+# Playwright 用于前端视觉回归：Python 包 + Chromium 浏览器二进制。
+# 这里只尝试安装，失败仅警告，不阻塞整体部署（visual_check.py 会优雅降级）。
+# ============================================================================
+ensure_playwright() {
+  step "检查 Playwright（visual-check 依赖）"
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "未找到 python3，跳过 Playwright 安装"
+    return 0
+  fi
+
+  # 先装 Python 包
+  if ! python3 -c "import playwright" >/dev/null 2>&1; then
+    info "安装 playwright Python 包"
+    if ! python3 -m pip install -q playwright 2>/tmp/pw-pip.err; then
+      warn "playwright Python 包安装失败：$(tail -n 1 /tmp/pw-pip.err 2>/dev/null)"
+      warn "visual_check 将降级为不可用，但不影响其它流程"
+      return 0
+    fi
+  fi
+
+  # 再检查/安装 Chromium 浏览器二进制
+  if ! python3 -m playwright install --help >/dev/null 2>&1; then
+    warn "playwright CLI 不可用，跳过浏览器安装"
+    return 0
+  fi
+
+  if ! python3 -m playwright install chromium >/dev/null 2>&1; then
+    warn "Playwright Chromium 浏览器下载失败（可能与网络有关）"
+    warn "visual_check 将降级为不可用，但不影响其它流程"
+    return 0
+  fi
+
+  ok "Playwright 就绪"
 }
 
 # ============================================================================

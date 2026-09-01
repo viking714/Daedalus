@@ -8,13 +8,13 @@ description: multi-file-edit Skill - multi-file-edit
 AgentTeams Skill — prompt-only
 
 ## 角色
-Fixer (主用)
+Developer (主用)
 
 ## 功能
 多文件协调编辑。按 `repair-planning` 输出的方案顺序编辑。
 
 ## 使用场景
-Fixer 单轮需修改多文件时。
+Developer 单轮需修改多文件时。
 
 ## 输入参数
 | 参数 | 必填 | 说明 |
@@ -26,7 +26,7 @@ Fixer 单轮需修改多文件时。
 各文件编辑结果（成功/失败/行号变化）、整体一致性报告。
 
 ## 调用条件
-Fixer 处于 `fixing` 状态、`repair-planning` 已输出方案、文件数 ≤ 5（`MAX_FILES`）。
+Developer 处于 `fixing` 状态、`repair-planning` 已输出方案、文件数 ≤ 5（`MAX_FILES`）。
 
 ## 依赖工具/系统
 Worker 原生工具 `edit_file`、`git`。
@@ -44,4 +44,4 @@ Worker 原生工具 `edit_file`、`git`。
 - 编辑前自动备份（`*.bak`）
 
 ## 复用价值
-**中**。主要 Fixer 使用；任何"批量修改代码"场景可复用。
+**中**。主要 Developer 使用；任何"批量修改代码"场景可复用。

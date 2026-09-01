@@ -8,7 +8,7 @@ description: root-cause-analysis Skill - root-cause-analysis
 AgentTeams Skill — with-scripts（核心脚本：`scripts/root_cause.py`）
 
 ## 角色
-Analyzer (主用)
+Architect (主用)
 
 ## 功能
 分析阶段的核心能力。**先判断任务类型**，再分流：
@@ -16,7 +16,7 @@ Analyzer (主用)
 - **新功能需求（Feature Request）** → 需求规格化（提取本质意图 / 功能需求 / 歧义点 / 边界条件 / 验收口径 / 约束）
 
 ## 使用场景
-Analyzer 在 `analyzing` 阶段整合多源信息后。
+Architect 在 `analyzing` 阶段整合多源信息后。
 
 ## 输入参数
 | 参数 | 必填 | 说明 |
@@ -44,10 +44,10 @@ Analyzer 在 `analyzing` 阶段整合多源信息后。
 ## 关键原则（新功能需求）
 - **示例 ≠ 需求**：issue 示例里的确切列名/格式不是需求本身，需求是底层能力
   （如「展示 route 归属」，而非「显示 Domain 列」）
-- **歧义显式化**：需求模糊时列出所有合理解释，让 Fixer 实现覆盖多解释的稳健版本
+- **歧义显式化**：需求模糊时列出所有合理解释，让 Developer 实现覆盖多解释的稳健版本
 
 ## 调用条件
-Analyzer 完成 `code-search` / `impact-analysis` / `lesson-lookup` 三个前置 Skill 后调用。
+Architect 完成 `code-search` / `impact-analysis` / `lesson-lookup` 三个前置 Skill 后调用。
 
 ## 依赖 MCP 原语
 `neo4j_dep_subgraph`（获取依赖子图，辅助根因推断）
@@ -61,4 +61,4 @@ Analyzer 完成 `code-search` / `impact-analysis` / `lesson-lookup` 三个前置
 - 置信度 < 0.5 → escalate
 
 ## 复用价值
-**中**。主要 Analyzer 使用；可作为"故障根因分析"通用能力。
+**中**。主要 Architect 使用；可作为"故障根因分析"通用能力。
