@@ -21,6 +21,8 @@ deploy/archive/
 docs/00_参考资料/
 # trae的分析文件
 .trae-html-share-packages
+# IDE 本地代理技能/配置（仅本地留存，不入仓库）
+.qoder/
 
 Daedalus.code-workspace
 

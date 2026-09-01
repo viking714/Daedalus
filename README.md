@@ -27,7 +27,7 @@ Today's Daedalus runs a full R&D team: bug fixes, feature development (including
 
 An issue enters. A resolved, tested, verified patch exits. Everything in between is handled by the team:
 
-<!-- Diagram source of truth: asset/architecture.svg. Re-export PNG: python .qoder/skills/svg-visual-review/scripts/render_svg.py asset/architecture.svg asset/architecture.png --scale 2 -->
+<!-- Diagram source of truth: asset/architecture.svg. To re-export the PNG, render the SVG at its viewBox size with any SVG→PNG tool (e.g. Playwright screenshot or cairosvg). -->
 
 <img src="asset/architecture.png" alt="Daedalus end-to-end flow. Left: issue sources - human chat room, Jira ticket listener, and incident alerts. Middle: the Daedalus 7-role agent team - Team Leader routing feature/greenfield, bug, and incident paths through PO, Architect, Developer, Tester, Reviewer, and Ops Analyst - invoking the skills layer over MCP to databases and GitHub. Right: delivery - a merge-ready pull request confirmed by human review; blocked cases escalate to a human; AgentLoop monitoring spans the full link." />
 
@@ -126,7 +126,6 @@ mcp_server/     Domain-skills MCP server (composed tools, data primitives, embed
 scripts/        SWE-bench automated evaluation runner
 asset/          Architecture diagrams (SVG source + exported PNG)
 docs/           Design documents (02_详细设计: v3.0 detailed design)
-.qoder/skills/  Project skills (svg-visual-review: render-and-inspect diagram loop)
 ```
 
 ## Roadmap

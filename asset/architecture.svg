@@ -5,7 +5,7 @@
                   -> 7-role agent team (feature/bug/incident routing)
                   -> skills(business + tool-type capabilities)
                   -> mcp -> data & external systems
-       Render preview: python .qoder/skills/svg-visual-review/scripts/render_svg.py
+       Render preview: any SVG->PNG renderer at viewBox size (1640x1000)
        ============================================================ -->
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
