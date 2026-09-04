@@ -1,8 +1,8 @@
 # MCP Server 运行依赖
 # 安装：pip install -r mcp_server/requirements.txt
 
-# MCP SDK
-mcp[cli]>=1.0
+# MCP SDK（锁定 1.9.4 —— 1.29+ 重构了 FastMCP，2.x 重命名为 MCPServer）
+mcp[cli]==1.9.4
 
 # 数据层
 psycopg2-binary>=2.9

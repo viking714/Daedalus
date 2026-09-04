@@ -69,7 +69,7 @@ received → triaging → clarifying → prd_drafting → prd_review → designi
 |---|---|
 | code | developer |
 | design | architect |
-| requirement | po |
+| requirement | product-owner |
 | environment | ops-analyst |
 | visual | developer |
 

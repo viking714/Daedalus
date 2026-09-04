@@ -1,18 +1,22 @@
 apiVersion: agentteams.io/v1beta1
 kind: Worker
 metadata:
-  name: po
+  name: product-owner
   labels:
     app.kubernetes.io/name: rd-defect-closed-loop
-    rd-defect/role: po
+    rd-defect/role: product-owner
 spec:
   displayName: PO
   runtime: openclaw
-  package: file:///deploy/packages/rd-defect-skills-v0.2.0.zip
+  # 技能按名装配：平台从 Manager 的 ~/worker-skills/<skill>/ 取，清单见 ../packages/rd-defect-skills/manifest.json
+  skills:
+    - prd-authoring
+    - code-read
+    - lesson-lookup
   model: Qwen/Qwen3.6-35B-A3B
   mcpServers:
     - name: domain-skills
-      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp
+      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp/
       transport: http
   env:
     - name: CODE_INTEL_MCP_URL
@@ -60,7 +64,7 @@ spec:
   channelPolicy:
     groupAllowExtra:
       - coordinator
-      - po
+      - product-owner
       - architect
       - developer
       - tester

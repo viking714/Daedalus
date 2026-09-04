@@ -8,12 +8,22 @@ metadata:
 spec:
   displayName: Architect
   runtime: openclaw
-  package: file:///deploy/packages/rd-defect-skills-v0.2.0.zip
+  # 技能按名装配：平台从 Manager 的 ~/worker-skills/<skill>/ 取，清单见 ../packages/rd-defect-skills/manifest.json
+  skills:
+    - architecture-design
+    - code-read
+    - bash-exec
+    - code-search
+    - impact-analysis
+    - root-cause-analysis
+    - module-lookup
+    - lesson-lookup
+    - visual-check
   model: moonshotai/Kimi-K2.7-Code
   mcpServers:
     - name: domain-skills
       # 占位符 __MCP_WORKER_HOST__/__MCP_PORT__ 由部署脚本按 config.env 渲染（改端口即全局生效）
-      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp
+      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp/
       transport: http
   env:
     - name: CODE_INTEL_MCP_URL
@@ -72,6 +82,11 @@ spec:
       - 需要查看具体代码 → code-read
       - 需要运行脚本验证 → bash-exec
 
+      ## 防重复发送（重要！）
+      - TASK_COMPLETED 消息只能发送一次。发送后不要再发相同内容。
+      - 如果你看到自己之前已经发过 TASK_COMPLETED，不要重复发送。
+      - 如果 coordinator 没有回应，等待即可，不要重发完成消息。
+
       ## 运维硬性规则（流水线运行规范，必须保留）
       - 每个来自 admin 的「New SWE-bench task」都是全新任务，必须从头跑完整流水线
         （analyze → fix → test → evaluate），不得因历史出现相同 issue ID 而跳过。
@@ -91,7 +106,7 @@ spec:
   channelPolicy:
     groupAllowExtra:
       - coordinator
-      - po
+      - product-owner
       - architect
       - developer
       - tester

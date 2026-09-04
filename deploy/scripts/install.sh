@@ -6,6 +6,7 @@
 #   - 数据库栈（PostgreSQL+pgvector / Redis / Meilisearch / Neo4j，docker compose；
 #     声明 XXX_EXTERNAL=1 则跳过安装直接复用外部连接）
 #   - 领域技能 MCP Server（本机进程，仓库 mcp_server/ 源码运行）
+#   - open-code-review（宿主机单文件二进制，Reviewer 确定性审查层；失败不阻断）
 #   - AgentTeams 平台 v1.2.x（官方安装器，AGENTTEAMS_* 契约）
 #   - 技能包推送 + Worker / Manager / Team 资源注册
 #   - （可选）AgentLoop 可观测（映射为安装器 AGENTTEAMS_CMS_*）
@@ -34,6 +35,7 @@ resolve_linux_mcp_host
 generate_db_env
 sync_mcp_code
 ensure_playwright
+ensure_ocr
 deploy_db_stack
 install_agentteams
 
@@ -42,6 +44,7 @@ if wait_controller_ready; then
   ok "controller 已就绪"
   push_skills_package
   register_resources
+  patch_worker_runtime
   launch_mcp_server
   verify_deployment
 else

@@ -8,11 +8,18 @@ metadata:
 spec:
   displayName: Ops Analyst
   runtime: openclaw
-  package: file:///deploy/packages/rd-defect-skills-v0.2.0.zip
+  # 技能按名装配：平台从 Manager 的 ~/worker-skills/<skill>/ 取，清单见 ../packages/rd-defect-skills/manifest.json
+  skills:
+    - ops-diagnosis
+    - env-inventory
+    - bash-exec
+    - code-read
+    - lesson-lookup
+    - knowledge-extraction
   model: deepseek-ai/DeepSeek-V4-Pro
   mcpServers:
     - name: domain-skills
-      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp
+      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp/
       transport: http
   env:
     - name: CODE_INTEL_MCP_URL
@@ -52,7 +59,7 @@ spec:
   channelPolicy:
     groupAllowExtra:
       - coordinator
-      - po
+      - product-owner
       - architect
       - developer
       - tester

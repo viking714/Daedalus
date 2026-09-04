@@ -1,0 +1,54 @@
+{
+  "rules": [
+    {
+      "path": "**/{test_*,*_test,conftest}.py",
+      "rule": "只审查测试是否真的能失败：断言必须绑定到被修改行为的可观察结果。若断言恒真（只判 not None、只判类型、期望值与被测实现同源），报告为 bug 并给出该断言所在行号。禁止把「测试覆盖率不足」当作缺陷报告。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.py",
+      "rule": "只报告能从本次 diff 直接证明的问题：新增或改动的函数签名与既有调用方不兼容（参数增删、默认值改变、返回类型改变），且 diff 内没有同步更新调用点。必须给出被破坏的调用点位置或说明无法从 diff 定位。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.py",
+      "rule": "检查修复是否顺手削弱了原有校验：删除或放宽 isinstance/None/边界断言、把异常改为静默返回、增加 with 之外裸开的 except、用 pass 或默认值吞掉错误分支。逐条指出被削弱的原行与新行。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.py",
+      "rule": "检查可复现性污染：diff 中残留调试输出（print/pdb/logging 临时语句）、写死本机绝对路径、写死真实密钥或 token、依赖当前时间或随机数而未固定。命中则给出具体行。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.{js,ts,tsx,jsx}",
+      "rule": "只检查两条：新增 SQL/命令/HTML 拼接是否存在注入或未转义输出；新增异步路径是否存在未处理的 rejection 或竞态写同一状态。每条须给出变量到达危险操作的路径。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.{java,kt}",
+      "rule": "只检查两条：新增解引用路径上缺失空值校验（给出可达的空来源）；共享可变状态的新增读写是否缺少同步。每条须给出该状态被并发访问的证据。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.{go}",
+      "rule": "只检查三条：error 被丢弃或覆盖；goroutine 无退出路径（泄漏）；context 未传递或被丢弃。每条须给出对应的行号。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*.{json,yaml,yml,toml,properties}",
+      "rule": "检查配置与契约变更的向后兼容性：字段改名/删除是否会影响既有读取方；schema 或接口定义变更是否与实现不一致。只报告有明确读取方证据的项。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/Dockerfile",
+      "rule": "检查镜像构建的可复现性与权限：latest 浮动标签、构建期需要网络但无固定版本、以 root 运行服务进程。只报告 diff 新增的行。",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*",
+      "rule": "范围与最小改动审查：报告中出现的所有非本次意图的文件（格式化、重命名、无关整理）单列为 scope 问题，说明它为何不属于本次修复。不要对未改动的代码提出意见。",
+      "merge_system_rule": true
+    }
+  ]
+}

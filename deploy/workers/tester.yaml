@@ -8,13 +8,19 @@ metadata:
 spec:
   displayName: Tester
   runtime: openclaw
-  package: file:///deploy/packages/rd-defect-skills-v0.2.0.zip
+  # 技能按名装配：平台从 Manager 的 ~/worker-skills/<skill>/ 取，清单见 ../packages/rd-defect-skills/manifest.json
+  skills:
+    - bash-exec
+    - test-run
+    - result-judge
+    - test-plan
+    - visual-check
   # 与 Developer 同模型，高频省钱
   model: deepseek-ai/DeepSeek-V4-Pro
   mcpServers:
     - name: domain-skills
       # 占位符 __MCP_WORKER_HOST__/__MCP_PORT__ 由部署脚本按 config.env 渲染（改端口即全局生效）
-      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp
+      url: http://__MCP_WORKER_HOST__:__MCP_PORT__/mcp/
       transport: http
   env:
     - name: CODE_INTEL_MCP_URL
@@ -171,7 +177,7 @@ spec:
   channelPolicy:
     groupAllowExtra:
       - coordinator
-      - po
+      - product-owner
       - architect
       - developer
       - tester

@@ -28,12 +28,17 @@
 - Developer：repair_planner / risk_gate
 - Tester：（result_judge 已转为 prompt-only Skill，由 Worker runtime 直接执行，不在此注册）
 - Reviewer：dep_graph_analyzer / contract_checker / knowledge_extraction
+             / ocr_delegate_preview / ocr_delegate_rule（open-code-review 确定性层）
 """
 
 import os
 import re
+import sys
 import uuid
+import shutil
+import hashlib
 import logging
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -389,7 +394,7 @@ def skill_release_decision(payload: dict) -> dict:
     # canary FAIL：按 failure_class 路由回退目标
     failure_class = confirmation.get("failure_class") if isinstance(confirmation, dict) else None
     if failure_class in ("requirement",):
-        target_stage, target_agent = "prd_drafting", "po"
+        target_stage, target_agent = "prd_drafting", "product-owner"
     elif failure_class in ("design",):
         target_stage, target_agent = "designing", "architect"
     elif failure_class in ("environment",):
@@ -1146,3 +1151,510 @@ def skill_module_lookup(payload: dict) -> dict:
         return {"status": "unavailable", "reason": str(e)}
     except Exception as e:  # noqa: BLE001
         return {"status": "error", "reason": str(e)}
+
+
+# --------------------------------------------------------------------------- #
+# Reviewer 确定性审查层（open-code-review delegate 模式封装）
+#
+# 接入定位（对齐详细设计 v3.1 §2.3）：
+# - ocr 只承担「确定性一半」：文件选择（保证不漏审）+ 规则解析（按语言匹配审查清单）。
+#   审查裁定权 100% 保留在 Reviewer 自身模型，因此绝不在 ocr 侧配置 LLM provider
+#   —— 否则变成"第二个 Reviewer"：多一份 API 账单，且两边结论冲突时 verdict 权威性受损。
+# - 仅在 evaluating 阶段暴露；双闸门（prd_review / design_review）审的是 PRD/ADD 文档，
+#   diff 审查工具对其无用，故不列入 Reviewer 通用工具表，避免角色任务面膨胀。
+# - 只读契约保持：Reviewer 不写业务仓库。补丁在宿主机 scratch 目录内重建
+#   （clone 缓存 -> checkout base_commit -> git apply），Worker 仅通过 payload 收发。
+# - 优雅降级：ocr 未安装 / 版本过低 / git 失败时返回 status=unavailable|error，
+#   Reviewer 降级为纯 LLM 审查并显式声明 coverage 不可证，服务整体不崩。
+# - 安全边界：MCP 端点对网络开放且本工具会读写宿主机文件系统，因此
+#   repo_path 必须落在白名单根目录内，patch 大小与 diff 回传量均设上限。
+# --------------------------------------------------------------------------- #
+
+_MCP_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+OCR_BIN = os.getenv("OCR_BIN", "ocr")
+OCR_SCRATCH_ROOT = os.getenv("OCR_SCRATCH_DIR", "/tmp/dd-ocr")
+# 仓库克隆缓存根：与 swe_bench_runner 的 REPO_CACHE_DIR 同源，避免两套路径
+_OCR_REPO_CACHE = os.getenv("SWE_REPO_CACHE", "/tmp/swe-repos")
+OCR_ALLOW_REPO_ROOTS = [p for p in re.split(r"[,;]", os.getenv("OCR_ALLOWED_REPO_ROOTS", "")) if p] or [_OCR_REPO_CACHE]
+OCR_MAX_PATCH_BYTES = int(os.getenv("OCR_MAX_PATCH_BYTES", str(2 * 1024 * 1024)))
+OCR_DIFF_BUDGET_BYTES = int(os.getenv("OCR_DIFF_BUDGET_BYTES", "120000"))
+OCR_TIMEOUT_SEC = int(os.getenv("OCR_TIMEOUT_SEC", "300"))
+# 团队规约注入（把工程约定从提示词升级为确定性检查）；设 OCR_RULE_PATH="" 可关闭
+OCR_RULE_PATH = os.getenv("OCR_RULE_PATH", os.path.join(_MCP_PKG_DIR, "..", "deploy", "rules", "ocr-rule.json"))
+# `ocr review/scan --format json` 自 1.9.0 起提供；delegate 子命令直接尝试 json，
+# 不区分版本（失败时按 unknown flag 重试），此常量仅用于上报探测结论
+OCR_JSON_MIN_VER = (1, 9, 0)
+
+
+class _OcrScratchError(Exception):
+    """scratch 工作树构建失败（克隆/检出/补丁应用）。"""
+
+
+def _ocr_ver_tuple(text: str):
+    """从 `ocr --version` 输出提取版本三元组；无法解析返回 None。"""
+    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
+def _ocr_probe() -> dict:
+    """探测 ocr 可用性与 --format json 支持度（结果进程内缓存）。"""
+    global _OCR_PROBE_CACHE
+    if _OCR_PROBE_CACHE is not None:
+        return _OCR_PROBE_CACHE
+    info = {"installed": False, "version": "", "json_capable": False, "reason": ""}
+    try:
+        r = _ocr_run(["--version"], cwd=os.path.dirname(_MCP_PKG_DIR))
+        out = (r["stdout"] or "") + (r["stderr"] or "")
+        if r["rc"] == 0:
+            tup = _ocr_ver_tuple(out)
+            info.update({
+                "installed": True,
+                "version": ".".join(str(x) for x in tup) if tup else out.strip()[:40],
+                "json_capable": bool(tup and tup >= OCR_JSON_MIN_VER),
+            })
+        else:
+            info["reason"] = f"`{OCR_BIN} --version` 退出码 {r['rc']}: {out.strip()[:200]}"
+    except Exception as e:  # noqa: BLE001
+        info["reason"] = f"版本探测失败: {e}"
+    _OCR_PROBE_CACHE = info
+    return info
+
+
+_OCR_PROBE_CACHE = None
+
+
+def _ocr_unavailable(info: dict) -> dict:
+    """统一降级载荷：明确告知 Reviewer 本次审查的完整性无法由工具证明。"""
+    return {
+        "status": "unavailable",
+        "reason": info.get("reason") or "ocr CLI 不可用",
+        "ocr_version": info.get("version", ""),
+        "degradation": "Reviewer 降级为纯 LLM 审查：coverage_rate 不可证，"
+                       "必须在 verdict 中声明未使用确定性文件清单",
+        "recovery": "重跑 make install（deploy/scripts/lib/common.sh: ensure_ocr），或手工安装 "
+                    "open-code-review 并确保 `ocr --version` 可执行",
+    }
+
+
+def _ocr_run(args: List[str], cwd: str) -> dict:
+    """执行 ocr 子命令（所有 ocr 调用的唯一出口）；永不抛异常。
+
+    返回 {rc, stdout, stderr}；rc=124 超时，rc=125 未找到可执行文件或启动失败。
+    """
+    try:
+        r = subprocess.run([OCR_BIN] + list(args), cwd=cwd, capture_output=True, text=True,
+                           timeout=OCR_TIMEOUT_SEC)
+        return {"rc": r.returncode, "stdout": r.stdout or "", "stderr": r.stderr or ""}
+    except subprocess.TimeoutExpired:
+        return {"rc": 124, "stdout": "", "stderr": f"ocr 超时（>{OCR_TIMEOUT_SEC}s）"}
+    except FileNotFoundError:
+        return {"rc": 125, "stdout": "", "stderr": f"未找到 `{OCR_BIN}` 可执行文件"
+                "（make install 会自动安装；或设 OCR_BIN 指定路径）"}
+    except Exception as e:  # noqa: BLE001
+        return {"rc": 125, "stdout": "", "stderr": str(e)}
+
+
+def _ocr_check_repo_path(repo_path: str):
+    """白名单校验：repo_path 必须位于克隆缓存根内，且自身是 git 仓库。"""
+    if not repo_path:
+        return None, "repo_path required（宿主机上的 git 仓库路径）"
+    real = os.path.realpath(repo_path)
+    if not any(real == os.path.realpath(r) or real.startswith(os.path.realpath(r).rstrip("/") + os.sep)
+               for r in OCR_ALLOW_REPO_ROOTS):
+        return None, (f"repo_path 不在允许的克隆缓存根内: {real}; "
+                      f"允许根: {OCR_ALLOW_REPO_ROOTS}（可用 OCR_ALLOWED_REPO_ROOTS 扩展）")
+    if not os.path.isdir(os.path.join(real, ".git")) and not os.path.isfile(os.path.join(real, "HEAD")):
+        return None, f"repo_path 不是 git 仓库（缺 .git）: {real}"
+    return real, None
+
+
+def _ocr_safe_rel(p: str):
+    """拒绝绝对路径与越界跳转——paths 参数来自 Worker（不可信输入）。"""
+    if not p or os.path.isabs(p) or ".." in p.replace("\\", "/").split("/"):
+        return None, f"非法路径: {p!r}"
+    return p.replace("\\", "/"), None
+
+
+def _ocr_rule_file(payload: dict):
+    """校验并返回团队规约文件绝对路径；不可注入时返回 ("", 原因)。
+
+    ocr 对 `--rule` 指向的坏文件是硬失败（loadRuleFile 直接返回 error），
+    所以先自行解析校验：宁可跳过规约注入，也不能让整次审查报错。
+    绝对路径在 ocr 侧直用（relative 才会拼到 repo root 下）。
+    """
+    if not payload.get("use_team_rules", True):
+        return "", "payload 显式关闭了团队规约注入"
+    path = payload.get("rule_file") or OCR_RULE_PATH
+    if not path:
+        return "", "未配置 OCR_RULE_PATH"
+    real = os.path.abspath(path)
+    if not os.path.isfile(real):
+        return "", f"团队规约文件不存在: {real}"
+    try:
+        import json as _json
+        with open(real, "r", encoding="utf-8") as f:
+            spec = _json.load(f)
+        entries = spec.get("rules")
+        if not isinstance(entries, list) or not entries:
+            return "", f"团队规约缺少非空 rules 数组: {real}"
+        bad = [i for i, e in enumerate(entries)
+               if not isinstance(e, dict) or not isinstance(e.get("path"), str)
+               or not isinstance(e.get("rule"), str)]
+        if bad:
+            return "", f"团队规约第 {bad} 条缺 path/rule 字段: {real}"
+        return real, ""
+    except Exception as e:  # noqa: BLE001
+        return "", f"团队规约不可解析，已跳过注入: {real}: {e}"
+
+
+def _ocr_prepare_scratch(task_id: str, repo_path: str, base_commit: str, patch_text: str) -> str:
+    """构建/复用 scratch 工作树：clone 缓存库 -> checkout base_commit -> git apply patch。
+
+    以 (task_id, repo, commit, patch 内容) 的哈希做幂等键，同一任务重复调用不重建。
+    """
+    key = hashlib.sha1(
+        "|".join([task_id or "-", repo_path, base_commit, patch_text]).encode("utf-8")
+    ).hexdigest()[:16]
+    entry = os.path.join(OCR_SCRATCH_ROOT, key)
+    # 工作树单独一层：就绪标记若落在工作树内会被 git 当成未跟踪文件计入审查范围
+    work = os.path.join(entry, "work")
+    marker = os.path.join(entry, ".ready")
+    if os.path.isfile(marker):
+        try:
+            with open(marker, "r", encoding="utf-8") as f:
+                if f.read().strip() == key:
+                    return work
+        except OSError:
+            pass
+
+    os.makedirs(entry, exist_ok=True)
+    if os.path.isdir(work):
+        shutil.rmtree(work, ignore_errors=True)
+
+    r = subprocess.run(["git", "clone", "--quiet", "--no-hardlinks", repo_path, work],
+                       capture_output=True, text=True, timeout=OCR_TIMEOUT_SEC)
+    if r.returncode != 0:
+        raise _OcrScratchError(f"克隆审查缓存失败: {(r.stderr or r.stdout).strip()[:300]}")
+
+    if base_commit:
+        r = subprocess.run(["git", "checkout", "--quiet", "--detach", base_commit],
+                           cwd=work, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise _OcrScratchError(
+                f"checkout base_commit 失败（{base_commit[:12]}）: {(r.stderr or r.stdout).strip()[:300]}")
+
+    patch_file = os.path.join(work, ".dd-review.patch")
+    with open(patch_file, "w", encoding="utf-8", newline="\n") as f:
+        f.write(patch_text)
+    # 与 swe_bench_runner 的补丁应用策略一致：先常规应用，失败再 --recount 重试
+    last = None
+    for extra in ([], ["--recount"]):
+        last = subprocess.run(["git", "apply"] + extra + [".dd-review.patch"],
+                              cwd=work, capture_output=True, text=True, timeout=120)
+        if last.returncode == 0:
+            break
+    os.remove(patch_file)
+    if last is None or last.returncode != 0:
+        raise _OcrScratchError(
+            "补丁无法应用到 base_commit（基线错位或补丁损坏）: "
+            f"{(last.stderr if last else '').strip()[:400]}")
+
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(key)
+    return work
+
+
+def _ocr_file_diff(work: str, path: str, status: str) -> str:
+    """取单文件变更内容：tracked 走 git diff HEAD，新增未跟踪文件直读全文。"""
+    if (status or "").startswith("?") or "untracked" in (status or "").lower():
+        try:
+            with open(os.path.join(work, path), "r", encoding="utf-8", errors="replace") as f:
+                return f"[new untracked file, full content]\n{f.read()[:20000]}"
+        except OSError:
+            return ""
+    r = subprocess.run(["git", "diff", "HEAD", "--", path], cwd=work,
+                       capture_output=True, text=True, timeout=120)
+    return r.stdout or ""
+
+
+def _ocr_pick(entry: dict, *keys):
+    for k in keys:
+        if entry.get(k) not in (None, ""):
+            return entry.get(k)
+    return None
+
+
+def _ocr_extract_lists(data: dict):
+    """解析 delegate preview 的 JSON 载荷。
+
+    字段名对齐 open-code-review 源码 cmd/opencodereview/delegate_cmd.go 的
+    delegatePreviewJSON / delegatePreviewFileJSON：
+      {schema_version, mode, repository, from/to/commit/merge_base, background,
+       total_files, reviewable_count, excluded_count, total_insertions, total_deletions,
+       reviewable_files[{path,status,insertions,deletions}],
+       excluded_files[+exclude_reason]}
+    候选名兜底只为兼容旧版本；顶层 key 对不上时返回 matched=False，
+    由调用方转 git 兜底并显式标注来源，绝不臆造结构。
+    """
+    raw_files = (_ocr_pick(data, "reviewable_files", "reviewable", "files") or [])
+    files = []
+    for e in raw_files:
+        if isinstance(e, str):
+            e = {"path": e}
+        p = _ocr_pick(e, "path", "file", "name")
+        if not p:
+            continue
+        files.append({
+            "path": p,
+            "status": _ocr_pick(e, "status", "state") or "",
+            "insertions": _ocr_pick(e, "insertions", "added") or 0,
+            "deletions": _ocr_pick(e, "deletions", "deleted") or 0,
+        })
+    raw_excl = (_ocr_pick(data, "excluded_files", "excluded", "skipped") or [])
+    excluded = []
+    for e in raw_excl:
+        if isinstance(e, str):
+            e = {"path": e}
+        p = _ocr_pick(e, "path", "file", "name")
+        if p:
+            excluded.append({"path": p, "reason": _ocr_pick(e, "exclude_reason", "reason", "why") or ""})
+    matched = "reviewable_files" in data or "files" in data or bool(raw_files)
+    meta = {k: data.get(k) for k in
+            ("schema_version", "mode", "merge_base", "total_files", "reviewable_count",
+             "excluded_count", "total_insertions", "total_deletions")}
+    return files, excluded, matched, meta
+
+
+@register("ocr_delegate_preview", "Reviewer",
+          "确定性审查范围界定：在宿主机 scratch 重建 base+patch 后由 ocr 选出必审文件（附各文件 diff 与覆盖率契约）")
+def skill_ocr_delegate_preview(payload: dict) -> dict:
+    """delegate 模式 Step 1：只让 ocr 做文件选择与排除判定，不做任何 LLM 调用。
+
+    入参：patch_text(必填) / repo_path(必填，须在白名单根内) / base_commit(必填)
+          task_id / exclude / background / background_file(宿主机文件) / rule_file /
+          use_team_rules / with_diff / paths(按需取 diff)
+    出参：reviewable_files(含 diff) / excluded_files / total_files / reviewable_count /
+          coverage_contract（均按 ocr delegate preview 真实 schema 得出）
+    """
+    probe = _ocr_probe()
+    if not probe["installed"]:
+        return _ocr_unavailable(probe)
+
+    patch_text = payload.get("patch_text") or payload.get("patch") or ""
+    if not patch_text.strip():
+        return {"status": "error", "reason": "patch_text required（Developer 的 fix.diff 全文）"}
+    if len(patch_text.encode("utf-8")) > OCR_MAX_PATCH_BYTES:
+        return {"status": "error",
+                "reason": f"patch 超过上限 {OCR_MAX_PATCH_BYTES} 字节；请分批送审或提高 OCR_MAX_PATCH_BYTES"}
+
+    repo_path, err = _ocr_check_repo_path(payload.get("repo_path") or "")
+    if err:
+        return {"status": "error", "reason": err}
+    base_commit = payload.get("base_commit") or ""
+    if not base_commit:
+        return {"status": "error", "reason": "base_commit required（用于把补丁重建到正确基线上）"}
+
+    try:
+        work = _ocr_prepare_scratch(payload.get("task_id") or "", repo_path, base_commit, patch_text)
+    except _OcrScratchError as e:
+        # 补丁应用不上本身就是高价值审查信号（基线错位 / 过度修改）
+        return {"status": "error", "reason": str(e),
+                "hint": "该失败应作为 failure_class=code 的证据记入 verdict"}
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": f"scratch 构建异常: {e}"}
+
+    args = ["delegate", "preview", "--repo", work, "--format", "json"]
+    if payload.get("exclude"):
+        args += ["--exclude", str(payload["exclude"])]
+    rule_file, rule_note = _ocr_rule_file(payload)
+    if rule_file:
+        args += ["--rule", rule_file]
+    bg_file = payload.get("background_file")
+    if bg_file:
+        if not os.path.isfile(str(bg_file)):
+            return {"status": "error",
+                    "reason": f"background_file 必须是宿主机上存在的文件: {bg_file}"
+                              "（Worker 容器内路径对本工具不可用，请改用 background 传文本）"}
+        args += ["--background-file", str(bg_file)]
+    elif payload.get("background"):
+        args += ["--background", str(payload["background"])[:8000]]
+
+    res = _ocr_run(args, cwd=work)
+    used_json = True
+    # 官方降级路径：低版本报 `unknown flag: --format` 时去掉该 flag 重跑一次（仅此一种错误重试）
+    if res["rc"] != 0 and "--format" in res["stderr"] + res["stdout"] and "flag" in res["stderr"] + res["stdout"]:
+        res = _ocr_run([a for a in args if a not in ("--format", "json")], cwd=work)
+        used_json = False
+    if res["rc"] != 0:
+        return {"status": "error", "reason": f"ocr delegate preview 退出码 {res['rc']}",
+                "stderr": res["stderr"].strip()[:800], "scratch_dir": work}
+
+    files, excluded, parsed, meta = [], [], False, {}
+    text_mode = ""
+    if used_json:
+        try:
+            import json as _json
+            data = _json.loads(res["stdout"][res["stdout"].index("{"):])
+            files, excluded, parsed, meta = _ocr_extract_lists(data)
+        except Exception:  # noqa: BLE001 解析失败时不臆造结构，转 git 兜底
+            parsed = False
+    if not parsed:
+        # text 模式或 key 不匹配：文件清单改由 git 兜底得出（来源已标注，不冒充 ocr 输出）
+        text_mode = "git-fallback"
+        r = subprocess.run(["git", "diff", "--name-status", "HEAD"], cwd=work,
+                           capture_output=True, text=True, timeout=120)
+        for line in (r.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                files.append({"path": parts[-1], "status": parts[0], "insertions": 0, "deletions": 0})
+        r = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"], cwd=work,
+                           capture_output=True, text=True, timeout=120)
+        for line in (r.stdout or "").splitlines():
+            if line.strip():
+                files.append({"path": line.strip(), "status": "untracked", "insertions": 0, "deletions": 0})
+
+    # diff 回传：按预算附带，超限的文件标记 diff_omitted，由 Reviewer 用 paths 参数分批取
+    want = payload.get("paths")
+    rejected = []
+    if want:
+        cleaned, bad = [], []
+        for p in want:
+            rel, e = _ocr_safe_rel(str(p))
+            (cleaned if rel else bad).append(rel or p)
+        targets = [f for f in files if f["path"] in cleaned]
+        rejected = bad
+    else:
+        targets = files if payload.get("with_diff", True) else []
+    budget = OCR_DIFF_BUDGET_BYTES
+    for f in files:
+        f["diff"] = ""
+        f["diff_omitted"] = False
+    for f in targets:
+        if not want and budget <= 0:
+            f["diff_omitted"] = True
+            continue
+        d = _ocr_file_diff(work, f["path"], f.get("status", ""))
+        if len(d) > budget and not want:
+            f["diff_omitted"] = True
+            continue
+        f["diff"] = d
+        budget -= len(d)
+
+    must_review = len(files)
+    ocr_total = meta.get("total_files")
+    out = {
+        "status": "ok",
+        "ocr_version": probe["version"],
+        "json_capable": probe["json_capable"],
+        "delegate_format": "json" if used_json else "text",
+        "file_list_source": "ocr" if parsed else text_mode,
+        "scratch_dir": work,
+        "total_files": (ocr_total if isinstance(ocr_total, int) and ocr_total
+                        else must_review + len(excluded)),
+        "reviewable_count": must_review,
+        "excluded_count": len(excluded),
+        "reviewable_files": files,
+        "excluded_files": excluded,
+        "coverage_contract": {
+            "rule": "分母 = reviewable_count。每个 reviewable_files 条目最终必须是 reviewed"
+                    "或有具体理由的 skipped；不得静默省略文件。excluded_files 是 ocr 的"
+                    "确定性排除（已附 reason），不需逐个审查，但需在 verdict 中原样引用。",
+            "required_verdict_fields": ["total_files", "reviewed_files", "skipped_files", "coverage_rate"],
+            "hard_gate": "coverage_rate = len(reviewed_files) / reviewable_count；"
+                         "小于 1.0（存在未交代文件）时本次审查无效，Team Leader 应要求重跑",
+        },
+        "team_rules_injected": bool(rule_file),
+        "note": "ocr 在本链路中只做文件选择与规则解析（无 LLM 调用）；"
+                "审查结论与 failure_class 判定由 Reviewer 自身模型负责。",
+    }
+    if rule_note:
+        out["team_rules_note"] = rule_note
+    if rejected:
+        out["rejected_paths"] = rejected
+        out["rejected_reason"] = "绝对路径或越界路径已拒绝"
+    if parsed:
+        out["ocr_mode"] = meta.get("mode") or ""
+        if meta.get("merge_base"):
+            out["merge_base"] = meta["merge_base"]
+        for k in ("total_insertions", "total_deletions"):
+            if meta.get(k) is not None:
+                out[k] = meta[k]
+        if str(meta.get("schema_version") or "") not in ("", "1"):
+            out["schema_note"] = (f"delegate JSON schema_version={meta.get('schema_version')} "
+                                  f"与已知契约（1）不同，字段解析可能不完整")
+    else:
+        out["parse_note"] = "未能按 ocr JSON 结构解析，文件清单已由 git 兜底；原始输出见 raw_output"
+        out["raw_output"] = res["stdout"][:4000]
+    if any(f.get("diff_omitted") for f in files):
+        out["diff_budget_note"] = (f"部分文件 diff 因预算（OCR_DIFF_BUDGET_BYTES="
+                                  f"{OCR_DIFF_BUDGET_BYTES}）未附带，请用 paths 参数分批取")
+    return out
+
+
+@register("ocr_delegate_rule", "Reviewer",
+          "确定性审查清单：按文件解析 ocr 规则集并按规则内容分组（同规则文件归并，避免重复）")
+def skill_ocr_delegate_rule(payload: dict) -> dict:
+    """delegate 模式 Step 2：取回每个文件的审查规则清单（ocr 侧零 LLM 调用）。
+
+    入参：scratch_dir(必填，来自 ocr_delegate_preview) / paths(必填，仓内相对路径列表)
+          rule_file / use_team_rules（规约注入，默认用 OCR_RULE_PATH）
+    出参：按官方 delegateRulesJSON 回传 {groups:[{group_id,source,pattern,files,rule}]}
+          source 为 custom|project|global|system；merge_system_rule 生效时
+          rule 已含合并后的文本。
+    """
+    probe = _ocr_probe()
+    if not probe["installed"]:
+        return _ocr_unavailable(probe)
+
+    work = payload.get("scratch_dir") or ""
+    real_scratch = os.path.realpath(OCR_SCRATCH_ROOT)
+    real_work = os.path.realpath(work) if work else ""
+    if not work or not real_work.startswith(real_scratch.rstrip("/") + os.sep) or not os.path.isdir(real_work):
+        return {"status": "error",
+                "reason": f"scratch_dir 必须位于审查 scratch 根目录内（先调 ocr_delegate_preview 获取）: {OCR_SCRATCH_ROOT}"}
+
+    paths = payload.get("paths") or []
+    if isinstance(paths, str):
+        paths = [paths]
+    safe, bad = [], []
+    for p in paths:
+        rel, e = _ocr_safe_rel(str(p))
+        (safe if rel else bad).append(rel or p)
+    if not safe:
+        return {"status": "error", "reason": "paths required（来自 preview 的 reviewable 文件路径列表）"}
+
+    args = ["delegate", "rule", "--repo", real_work, "--format", "json"]
+    rule_file, rule_note = _ocr_rule_file(payload)
+    if rule_file:
+        args += ["--rule", rule_file]
+    args += safe
+
+    res = _ocr_run(args, cwd=real_work)
+    used_json = True
+    if res["rc"] != 0 and "--format" in res["stderr"] + res["stdout"] and "flag" in res["stderr"] + res["stdout"]:
+        res = _ocr_run([a for a in args if a not in ("--format", "json")], cwd=real_work)
+        used_json = False
+    if res["rc"] != 0:
+        return {"status": "error", "reason": f"ocr delegate rule 退出码 {res['rc']}",
+                "stderr": res["stderr"].strip()[:800]}
+
+    out = {"status": "ok", "ocr_version": probe["version"],
+           "delegate_format": "json" if used_json else "text",
+           "team_rules_injected": bool(rule_file),
+           "requested_paths": safe}
+    if bad:
+        out["rejected_paths"] = bad
+        out["rejected_reason"] = "绝对路径或越界路径已拒绝"
+    if rule_note:
+        out["team_rules_note"] = rule_note
+    try:
+        import json as _json
+        out["rule_groups"] = _json.loads(res["stdout"][res["stdout"].index("{"):])
+    except Exception:  # noqa: BLE001
+        out["rule_groups_raw"] = res["stdout"][:8000]
+        out["parse_note"] = "规则输出非 JSON，按原文回传；请直接把该清单作为审查 checklist 使用"
+    out["note"] = "规则清单是审查 checklist，不是结论；是否成立由 Reviewer 判断。"
+    return out

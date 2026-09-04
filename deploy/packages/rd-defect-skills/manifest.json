@@ -1,7 +1,7 @@
 {
   "name": "rd-defect-skills",
-  "version": "0.2.0",
-  "description": "研发缺陷闭环协同系统 AgentTeams Skills 包 —— 支持 incident/bug/feature 三类任务，七角色协同，扩展 PRD/ADD/visual/ops 等技能（prompt-only + with-scripts）",
+  "version": "0.2.2",
+  "description": "研发缺陷闭环协同系统 AgentTeams Skills 包 —— 支持 incident/bug/feature 三类任务，七角色协同，扩展 PRD/ADD/visual/ops 等技能（prompt-only + with-scripts + mcp-tool）",
   "author": "Daedalus Team",
   "license": "Apache-2.0",
   "repository": "https://github.com/your-org/Daedalus",
@@ -30,16 +30,19 @@
       "env-inventory",
       "visual-check",
       "test-plan"
+    ],
+    "mcp_tool": [
+      "ocr-delegate-review"
     ]
   },
   "workers": {
     "team_leader":  ["repo-index", "pipeline-router", "code-read", "bash-exec"],
     "coordinator":  ["repo-index", "pipeline-router", "code-read", "bash-exec"],
-    "po":           ["prd-authoring", "code-read", "lesson-lookup"],
+    "product-owner":           ["prd-authoring", "code-read", "lesson-lookup"],
     "architect":    ["architecture-design", "code-read", "bash-exec", "code-search", "impact-analysis", "root-cause-analysis", "module-lookup", "lesson-lookup", "visual-check"],
     "developer":    ["code-read", "bash-exec", "patch-generate", "multi-file-edit", "repair-planning", "lesson-lookup", "visual-check"],
     "tester":       ["bash-exec", "test-run", "result-judge", "test-plan", "visual-check"],
-    "reviewer":     ["code-read", "bash-exec", "impact-analysis", "result-judge", "knowledge-extraction", "visual-check"],
+    "reviewer":     ["code-read", "bash-exec", "impact-analysis", "result-judge", "knowledge-extraction", "visual-check", "ocr-delegate-review"],
     "ops-analyst":  ["ops-diagnosis", "env-inventory", "bash-exec", "code-read", "lesson-lookup", "knowledge-extraction"]
   },
   "mcp_server": {
@@ -56,7 +59,11 @@
       "hybrid_search"
     ]
   },
+  "mcp_server_tools": {
+    "reviewer_evaluating_only": ["ocr_delegate_preview", "ocr_delegate_rule"]
+  },
   "changelog": {
+    "0.2.1": "新增 ocr-delegate-review（Reviewer 独占，仅 evaluating 阶段）：封装 open-code-review delegate 模式为两个 MCP 组合工具，ocr 只做文件选择与规则解析（零 LLM），审查裁定权保留在 GLM-5.2；配套团队规约 deploy/rules/ocr-rule.json 与覆盖率硬门（coverage_rate < 1.0 判审查无效）",
     "0.1.1": "统一命名: knowledge_miner → knowledge-extraction; result_judge 从 MCP 工具转为 prompt-only Skill; 新增 MCP 原语层（14 个细粒度数据访问原语）",
     "0.1.0": "初始版本: 16 个 MCP 技能扁平注册"
   }

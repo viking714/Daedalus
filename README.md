@@ -43,6 +43,7 @@ Issues arrive through the team chat room, a Jira ticket listener, or an incident
 | **State & Cache** | Redis — file-hash cache for commit status monitoring |
 | **Shared Storage** | MinIO — artifact exchange between agents |
 | **Skill Protocol** | MCP (Model Context Protocol) — domain skills served to every worker |
+| **Deterministic Review** | [open-code-review](https://open-codereview.ai/) in delegate mode — file selection & rule resolution only, no extra model |
 
 ## The Team
 
@@ -53,7 +54,7 @@ Issues arrive through the team chat room, a Jira ticket listener, or an incident
 | **Architect** | Bug fix: root-cause analysis. Feature / greenfield: docs-first architecture design (ADD), tech-stack rationale, and visual baseline extraction. |
 | **Developer** | Implements the fix or feature according to PRD+ADD; bug fix uses minimal patch; frontend changes consume `ui_spec` and run `visual_check` self-check. |
 | **Tester** | Derives tests from PRD independently, executes them, and runs visual regression where applicable. |
-| **Reviewer** | The senior quality gate. Reviews code/design with the strongest model, outputs `failure_class`, and blocks Verdict until quality is proven. |
+| **Reviewer** | The senior quality gate. Reviews code/design with the strongest model, backed by a **deterministic coverage gate** (which files must be reviewed, and against which rules), outputs `failure_class`, and blocks Verdict until quality is proven. |
 | **Ops Analyst** | Incident triage only. Diagnoses production environments, produces a diagnosis report, and routes code issues back as bugs. Never mutates production. |
 
 New roles plug into the same declarative YAML templates — the org chart is configuration, not code.
@@ -80,8 +81,9 @@ First-time setup:
 ```bash
 cp deploy/config.env.example deploy/config.env   # fill in API keys / admin password
 make install                                     # install DB stack + MCP server + platform
-                                                 # (Playwright for visual-check is auto-installed;
-                                                 #  failure only degrades visual checks, never blocks install)
+                                                 # (Playwright for visual-check and the open-code-review
+                                                 #  binary for deterministic review are auto-installed;
+                                                 #  failure only degrades those checks, never blocks install)
 ```
 
 Daily operation — bring up the entire company with one command:
@@ -121,11 +123,11 @@ Open the AgentTeams chat UI and send a task directly to the **Team Leader** agen
 ## Repository Layout
 
 ```
-deploy/          AgentTeams installers, 7 worker/team templates, skill package (v0.2.0), ops scripts
+deploy/          AgentTeams installers, 7 worker/team templates, skill package (v0.2.2), team review rules, ops scripts
 mcp_server/     Domain-skills MCP server (composed tools, data primitives, embeddings)
 scripts/        SWE-bench automated evaluation runner
 asset/          Architecture diagrams (SVG source + exported PNG)
-docs/           Design documents (02_详细设计: v3.0 detailed design)
+docs/           Design documents (02_详细设计: v3.1 detailed design)
 ```
 
 ## Roadmap

@@ -17,12 +17,121 @@
     },
     "suggested_rollback_target": {
       "type": "string",
-      "enum": ["developer", "architect", "po", "ops-analyst"],
+      "enum": ["developer", "architect", "product-owner", "ops-analyst"],
       "description": "建议的回退目标角色"
     },
     "details": {
       "type": "string",
       "description": "具体问题描述，含行号/PRD 条目引用/环境检查项"
+    },
+    "code_review_evidence": {
+      "type": "object",
+      "description": "确定性代码审查证据（Reviewer 在 evaluating 阶段由 ocr-delegate-review 产出）。\n作用：把「审了哪些文件、按什么标准审、哪些成立」从模型自述变成可核对的结构化凭据。\n省略或为 null 表示本次未走确定性审查链路（双闸门 prd_review / design_review 不适用本字段）；\n工具不可用时仍需给出本字段并将 coverage_rate 置 null，以显式暴露「覆盖率不可证」这一事实。",
+      "required": ["coverage_rate"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "产出该证据的技能/工具名，固定 ocr-delegate-review"
+        },
+        "ocr_version": {
+          "type": "string",
+          "description": "宿主机 open-code-review CLI 版本"
+        },
+        "delegate_format": {
+          "type": "string",
+          "enum": ["json", "text"],
+          "description": "ocr delegate 输出格式；text 表示低版本降级"
+        },
+        "file_list_source": {
+          "type": "string",
+          "enum": ["ocr", "git-fallback"],
+          "description": "必审文件清单来源；git-fallback 表示未能按 ocr JSON 结构解析"
+        },
+        "total_files": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "变更文件总数（含被确定性排除项）"
+        },
+        "reviewable_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "必审文件数 = 覆盖率分母"
+        },
+        "excluded_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ocr 确定性排除的文件数"
+        },
+        "reviewed_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "已逐个审查的文件路径（仓内相对路径）"
+        },
+        "skipped_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "reason"],
+            "properties": {
+              "path": { "type": "string" },
+              "reason": { "type": "string", "description": "具体跳过理由；空理由等同于未交代" }
+            }
+          },
+          "description": "未审但已交代的文件（每项必须有理由）"
+        },
+        "excluded_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "path": { "type": "string" },
+              "exclude_reason": { "type": "string", "description": "原样引用 ocr 给出的排除原因" }
+            }
+          },
+          "description": "ocr 的确定性排除清单，不需逐个审查但须原样引用"
+        },
+        "coverage_rate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "len(reviewed_files) / reviewable_count。小于 1.0 时本次审查无效，\nTeam Leader 应要求重跑；null 表示工具不可用导致覆盖率不可证。"
+        },
+        "team_rules_injected": {
+          "type": "boolean",
+          "description": "本次是否注入了团队规约（deploy/rules/ocr-rule.json）"
+        },
+        "findings": {
+          "type": "array",
+          "description": "行级审查发现。仅 disposition=confirmed 的条目可作为驳回依据；\ndismissed / not_applicable 须保留并附理由（这是「看过并否掉」的审计证据）。",
+          "items": {
+            "type": "object",
+            "required": ["path", "disposition"],
+            "properties": {
+              "path": { "type": "string" },
+              "line": { "type": ["integer", "null"], "description": "行号；无法定位到行时为 null" },
+              "category": {
+                "type": "string",
+                "enum": ["bug", "security", "performance", "maintainability", "test", "style", "documentation", "other"],
+                "description": "ocr 系统规则类别"
+              },
+              "severity": {
+                "type": "string",
+                "enum": ["Critical", "High", "Medium", "Low"],
+                "description": "Critical / High 必须逐条明确回应（裁定权仍在 Reviewer，不自动驳回）"
+              },
+              "rule": { "type": "string", "description": "命中的规则条目文本（来自 delegate rule 清单）" },
+              "observation": { "type": "string", "description": "实际观察到什么" },
+              "disposition": {
+                "type": "string",
+                "enum": ["confirmed", "dismissed", "not_applicable"],
+                "description": "Reviewer 对该发现的裁定"
+              },
+              "reason": { "type": "string", "description": "裁定理由；dismissed / not_applicable 必填" }
+            }
+          }
+        }
+      }
     }
   }
 }

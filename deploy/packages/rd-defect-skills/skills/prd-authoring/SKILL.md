@@ -3,7 +3,7 @@ name: prd-authoring
 version: 0.2.0
 description: PO 主用：PRD 生成规范、DoR 检查表、Gate0 需求澄清协议。
 type: prompt-only
-roles: [po]
+roles: [product-owner]
 ---
 
 # prd-authoring

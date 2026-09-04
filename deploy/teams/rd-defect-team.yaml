@@ -13,7 +13,7 @@ spec:
   workerMembers:
     - name: coordinator
       role: team_leader
-    - name: po
+    - name: product-owner
       role: worker
     - name: architect
       role: worker

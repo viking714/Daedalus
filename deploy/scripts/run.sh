@@ -38,6 +38,7 @@ do_start() {
   platform_start
   if wait_controller_ready; then
     register_resources
+    patch_worker_runtime
     verify_deployment
     expose_minio_console
   else

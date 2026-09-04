@@ -29,7 +29,14 @@ AGENTTEAMS_INSTALLER_URL="https://raw.githubusercontent.com/agentscope-ai/AgentT
 CONTROLLER="agentteams-controller"
 MANAGER="agentteams-manager"
 DASHBOARD="agentteams-dashboard"
-RD_WORKERS=(coordinator po architect developer tester reviewer ops-analyst)
+RD_WORKERS=(coordinator product-owner architect developer tester reviewer ops-analyst)
+
+# open-code-review（ocr）——Reviewer 确定性审查层（delegate 模式）的宿主机依赖。
+# 只使用 ocr 的文件选择 + 规则解析能力，绝不在 ocr 侧配置 LLM（否则变成第二个 Reviewer）。
+# OCR_MIN_VERSION：delegate 子命令 `--format json` 可用版本（低版本工具会自动降级为 git 兜底清单）。
+OCR_PINNED_VERSION="v1.11.2"
+OCR_MIN_VERSION="1.9.0"
+OCR_RELEASE_BASE="https://github.com/alibaba/open-code-review/releases/download"
 
 # ---- 颜色 ----
 if [[ -t 1 ]]; then
@@ -103,6 +110,21 @@ load_config() {
   # MCP Server 直接运行于仓库 mcp_server/ 源码目录（无需同步/拷贝）
   export MCP_SRC_DIR="${REPO_ROOT}/mcp_server"
 
+  # open-code-review：ocr.env 由 ensure_ocr 生成，记录宿主机上 ocr 的实际绝对路径，
+  # 使 MCP Server 在任意 shell（包括 ~/.local/bin 不在 PATH 时）都能找到它。
+  [[ -f "${DEPLOY_DIR}/ocr.env" ]] && source "${DEPLOY_DIR}/ocr.env"
+  OCR_BIN="${OCR_BIN:-ocr}"
+  OCR_SCRATCH_DIR="${OCR_SCRATCH_DIR:-/tmp/dd-ocr}"
+  # OCR_RULE_PATH=none 关闭团队规约注入（留空则用仓内默认文件）
+  if [[ "${OCR_RULE_PATH:-}" == "none" ]]; then
+    OCR_RULE_PATH=""
+  else
+    OCR_RULE_PATH="${OCR_RULE_PATH:-${REPO_ROOT}/deploy/rules/ocr-rule.json}"
+  fi
+  # 仓库克隆缓存根：与 swe_bench_runner 同源，也决定 MCP 端允许审查的仓库白名单
+  SWE_REPO_CACHE="${SWE_REPO_CACHE:-/tmp/swe-repos}"
+  export OCR_BIN OCR_SCRATCH_DIR OCR_RULE_PATH SWE_REPO_CACHE
+
   # 默认值兜底（官方安装器读取 AGENTTEAMS_* 前缀）
   AGENTTEAMS_VERSION="${AGENTTEAMS_VERSION:-${AGENTTEAMS_PINNED_VERSION}}"
   AGENTTEAMS_NON_INTERACTIVE="${AGENTTEAMS_NON_INTERACTIVE:-1}"
@@ -163,6 +185,17 @@ require_config() {
     for m in ${missing[@]+"${missing[@]}"}; do echo "  - $m" >&2; done
     exit 1
   fi
+  # worker 名会被平台直接用作 MinIO access key，长度限 3-20；越界时平台只报
+  # "The access key is invalid"，该角色静默停在 Failed 且不建容器，排查成本极高
+  # （实测两字符的角色名就会触发）。把约束在部署前讲清楚，而不是等 MinIO 报错。
+  local w name_bad=0
+  for w in "${RD_WORKERS[@]}"; do
+    if [[ "${#w}" -lt 3 || "${#w}" -gt 20 ]]; then
+      fail "worker 名 '${w}' 长度 ${#w} 超出 MinIO access key 允许的 3-20，请改用更长的角色标识符"
+      name_bad=1
+    fi
+  done
+  [[ "${name_bad}" == "0" ]] || exit 1
 }
 
 genpw_local() {
@@ -252,6 +285,160 @@ ensure_playwright() {
   fi
 
   ok "Playwright 就绪"
+}
+
+# ============================================================================
+# open-code-review（ocr）安装与版本校验
+# ----------------------------------------------------------------------------
+# 定位：Reviewer 的「确定性约束工具」，仅用 delegate 模式（ocr 端零 LLM）。
+# 因此只装到宿主机（MCP Server 所在机器）：ocr_delegate_* 组合工具在宿主机
+# scratch 目录重建 base+patch 后调用 ocr，Worker 容器无需自带。
+# 与 Playwright 同级：失败只告警，不阻断部署——工具会返回 status=unavailable，
+# Reviewer 降级为纯 LLM 审查（但必须在 verdict 里声明 coverage 不可证）。
+# ============================================================================
+_ocr_ver_ge() {
+  # _ocr_ver_ge "<任意版本文本>" "<x.y.z>" —— 文本里提不出版本号则返回失败。
+  # 纯 shell 比较：不依赖 python3（Windows Store 假 alias 会静默报错）也不依赖 sort -V（BSD sort 不支持）。
+  local cur min i a b
+  cur="$(printf '%s' "${1:-}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+  [[ -n "${cur}" ]] || return 1
+  min="${2}"
+  case "${cur}" in *.*.*) ;; *) cur="${cur}.0" ;; esac
+  case "${min}" in *.*.*) ;; *) min="${min}.0" ;; esac
+  local IFS=.
+  # shellcheck disable=SC2206
+  local -a A=( ${cur} ) B=( ${min} )
+  for i in 0 1 2; do
+    a=$((10#${A[i]:-0})); b=$((10#${B[i]:-0}))
+    (( a > b )) && return 0
+    (( a < b )) && return 1
+  done
+  return 0
+}
+
+_ocr_exe() {
+  # 把 OCR_BIN 的三种可能形态（PATH 裸名 / POSIX 绝对路径 / cygpath 的 Windows 形式）
+  # 统一解析成当前 bash 可直接执行的路径；不可用则返回非 0。
+  local cand="${1:-}"
+  [[ -n "${cand}" ]] || return 1
+  if [[ "${cand}" == *\\* ]] && command -v cygpath >/dev/null 2>&1; then
+    cand="$(cygpath -u "${cand}")"
+  fi
+  if [[ "${cand}" == */* ]]; then
+    [[ -x "${cand}" ]] || return 1
+    printf '%s\n' "${cand}"
+    return 0
+  fi
+  command -v "${cand}" 2>/dev/null
+}
+
+_ocr_report() {
+  # 统一打印版本与降级提示，并把实际路径写入 ocr.env（跨 shell 固定 OCR_BIN）
+  local bin="$1" txt env_bin="${1}"
+  txt="$("${bin}" --version 2>&1 | head -1 || true)"
+  if _ocr_ver_ge "${txt}" "${OCR_MIN_VERSION}"; then
+    ok "ocr 就绪: ${bin} (${txt:-版本未知})"
+  else
+    warn "ocr 版本不符要求（${txt:-无法解析} < ${OCR_MIN_VERSION}）：delegate --format json 可能不可用；"
+    warn "ocr_delegate_* 会自动降级为 git 兜底文件清单（来源字段会标注为 git-fallback）"
+  fi
+  # Git Bash / MSYS：宿主机 python 是 Windows 版，认不了 /c/... 路径，必须存 Windows 形式
+  if command -v cygpath >/dev/null 2>&1; then
+    env_bin="$(cygpath -w "${bin}")"
+  fi
+  cat > "${DEPLOY_DIR}/ocr.env" <<ENV
+# 由 ensure_ocr 生成（请勿手动编辑；重跑 install.sh 会更新）
+OCR_BIN=${env_bin}
+ENV
+  ok "已写入 ${DEPLOY_DIR}/ocr.env（OCR_BIN=${env_bin}）"
+  # 只写文件不够：load_config 早于 ensure_ocr，那时 ocr.env 尚不存在，OCR_BIN 已被
+  # 定成默认裸名并 export；与本函数同进程的 launch_mcp_server / verify_deployment
+  # 会继承这个错值（宿主机 ~/.local/bin 不在 PATH 时，首次安装必然踩空）。Python 侧
+  # 只 os.getenv("OCR_BIN")、不读 ocr.env，所以必须在这里同步刷新当前进程。
+  OCR_BIN="${env_bin}"
+  export OCR_BIN
+}
+
+ensure_ocr() {
+  step "检查 open-code-review（Reviewer 确定性审查层依赖）"
+  if [[ "${OCR_INSTALL_SKIP:-0}" == "1" ]]; then
+    warn "OCR_INSTALL_SKIP=1：跳过安装；ocr_delegate_* 将返回 unavailable，Reviewer 降级为纯 LLM 审查"
+    return 0
+  fi
+
+  # 1) 已可用（PATH 中、或显式指定、或上一次装到 ~/.local/bin）则不重装
+  local cand probe
+  for cand in "${OCR_BIN:-ocr}" ocr "${HOME}/.local/bin/ocr" "${HOME}/.local/bin/ocr.exe"; do
+    if probe="$(_ocr_exe "${cand}")"; then
+      _ocr_report "${probe}"
+      return 0
+    fi
+  done
+
+  # 2) 平台识别（官方发布为单文件二进制，无额外依赖，仅需 Git >= 2.41）
+  local os arch ext
+  case "${UNAME_S}" in
+    Darwin)            os="darwin";  ext="" ;;
+    Linux)             os="linux";   ext="" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows"; ext=".exe" ;;
+    *) warn "未知系统 ${UNAME_S}，跳过 ocr 安装（Reviewer 降级为纯 LLM 审查）"; return 0 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64)  arch="amd64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *) warn "未知架构 $(uname -m)，跳过 ocr 安装"; return 0 ;;
+  esac
+  if ! command -v git >/dev/null 2>&1; then
+    warn "未找到 git（ocr 要求 Git >= 2.41），跳过 ocr 安装"
+    return 0
+  fi
+
+  local want="${OCR_VERSION:-${OCR_PINNED_VERSION}}"
+  local base="${OCR_RELEASE_BASE_URL:-${OCR_RELEASE_BASE}}"   # 国内网络可指向镜像站
+  local bin_dir="${OCR_INSTALL_DIR:-${HOME}/.local/bin}"
+  local target="${bin_dir}/ocr${ext}"
+  local asset="opencodereview-${os}-${arch}${ext}"
+  mkdir -p "${bin_dir}" || { warn "无法写入 ${bin_dir}，跳过 ocr 安装"; return 0; }
+
+  info "下载 ocr ${want} (${asset}) -> ${target}"
+  if ! curl -fsSL --retry 3 -o "${target}.tmp" "${base}/${want}/${asset}"; then
+    warn "ocr 下载失败（网络/镜像问题）；可设 OCR_RELEASE_BASE_URL 指向镜像站，或手工下载后重跑"
+    warn "本次部署继续：ocr_delegate_* 将返回 unavailable，Reviewer 降级为纯 LLM 审查"
+    rm -f "${target}.tmp"
+    return 0
+  fi
+
+  # 3) 完整性校验（尽力而为：取不到 sha256sum.txt 或无校验工具则只告警不阻断）
+  local shasum_bin=""
+  if command -v sha256sum >/dev/null 2>&1; then shasum_bin="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then shasum_bin="shasum -a 256"; fi
+  if [[ -n "${shasum_bin}" ]] \
+     && curl -fsSL --retry 2 -o "${target}.sha256" "${base}/${want}/sha256sum.txt"; then
+    local want_sha got_sha
+    # 不假设列顺/分隔符：从命中行里提 64 位十六进制串
+    want_sha="$(grep -wF "${asset}" "${target}.sha256" | head -1 | grep -oE '[0-9a-fA-F]{64}' | head -1)"
+    got_sha="$(cd "${bin_dir}" && ${shasum_bin} "${target}.tmp" | awk '{print $1}')"
+    rm -f "${target}.sha256"
+    if [[ -z "${want_sha}" ]]; then
+      warn "sha256sum.txt 中未找到 ${asset}，跳过校验"
+    elif [[ "${want_sha}" != "${got_sha}" ]]; then
+      warn "ocr 下载产物 sha256 不匹配（期望 ${want_sha:0:12}…，实际 ${got_sha:0:12}…），已丢弃"
+      rm -f "${target}.tmp"
+      return 0
+    else
+      ok "sha256 校验通过"
+    fi
+  else
+    warn "未做 sha256 校验（缺校验工具或 sha256sum.txt 不可达）"
+  fi
+
+  chmod +x "${target}.tmp" && mv -f "${target}.tmp" "${target}" \
+    || { warn "无法安装到 ${target}，请设 OCR_INSTALL_DIR 指向可写目录"; return 0; }
+
+  if ! command -v ocr >/dev/null 2>&1; then
+    warn "${bin_dir} 不在 PATH；已写入 ocr.env，MCP Server 会经 OCR_BIN 绝对路径调用（命令行手工调用需自行加 PATH）"
+  fi
+  _ocr_report "${target}"
 }
 
 # ============================================================================
@@ -453,8 +640,18 @@ sync_db_passwords() {
   redis_pw=$(grep '^REDIS_PASSWORD=' "${DB_ENV}" 2>/dev/null | cut -d= -f2-)
   meili_key=$(grep '^MEILI_MASTER_KEY=' "${DB_ENV}" 2>/dev/null | cut -d= -f2-)
   if [[ "${POSTGRES_EXTERNAL:-0}" != "1" && -n "${pg_pw}" ]]; then
-    # 必须走 TCP（-h 127.0.0.1）才能触发密码认证；容器内本地 socket 是免密的，测不出差异
-    if ! docker exec -e PGPASSWORD="${pg_pw}" at-postgres psql -h 127.0.0.1 -U agent -d agentteams -tAc "select 1" >/dev/null 2>&1; then
+    # 全新卷首次 initdb 需时较长（entrypoint 会临时起停一次），期间 TCP 连接必失败；
+    # 不等就绪就测，会把「还在初始化」误判成「密码不一致」（下方 Neo4j 已按此处理）。
+    local _pg_ok=0 _p
+    for _p in $(seq 1 24); do
+      docker exec at-postgres pg_isready -h 127.0.0.1 -q >/dev/null 2>&1 && { _pg_ok=1; break; }
+      sleep 5
+    done
+    if [[ "${_pg_ok}" != "1" ]]; then
+      warn "PostgreSQL 未在 120s 内就绪，跳过密码同步检查（稍后可 ./run.sh start 重试）"
+    elif
+      # 必须走 TCP（-h 127.0.0.1）才能触发密码认证；容器内本地 socket 是免密的，测不出差异
+      ! docker exec -e PGPASSWORD="${pg_pw}" at-postgres psql -h 127.0.0.1 -U agent -d agentteams -tAc "select 1" >/dev/null 2>&1; then
       if docker exec -e PGPASSWORD="changeme" at-postgres psql -h 127.0.0.1 -U agent -d agentteams -tAc "select 1" >/dev/null 2>&1; then
         # 卷初始化时密码变量未注入而用了 compose 默认值：经免密 socket 把库内密码改为 db/.env 的值
         docker exec at-postgres psql -U agent -d agentteams -tAc "ALTER USER agent PASSWORD '${pg_pw}'" >/dev/null 2>&1 \
@@ -577,6 +774,12 @@ render_mcp_template() {
 
 # ============================================================================
 # 领域技能包
+# 两条分发路径，职责不同：
+#   1) zip 产物（build_skills_package）——版本化构件，供整包导入与存档；
+#      平台只认 “agt apply worker --zip”（manifest.json 在 zip 根），且整包不分角色。
+#   2) canonical 目录（stage_worker_skills + push_worker_skills）——按角色装配的正路：
+#      Manager 的 ~/worker-skills/<skill>/SKILL.md + Worker CR 的 spec.skills 按名引用。
+#      只有这条能保持 §2.3 的角色技能划分（例如 ocr-delegate-review 仅 Reviewer）。
 # ============================================================================
 build_skills_package() {
   # 按 manifest 版本号打包技能包（源码未变更则跳过），输出稳定名 + 版本名两个 zip
@@ -588,9 +791,14 @@ build_skills_package() {
   local out_dir="${DEPLOY_DIR}/packages"
   local zip_ver="${out_dir}/rd-defect-skills-v${version}.zip"
   local zip_stable="${out_dir}/rd-defect-skills.zip"
-  # 仅当源码比已有产物更新时重新打包
-  local newest
-  newest="$(find "${pkg_dir}/skills" -type f -name 'SKILL.md' -newer "${zip_ver}" 2>/dev/null | wc -l)"
+  # 仅当源码比已有产物更新时重新打包。
+  # 注意：版本名 zip 不存在时（全新机器、或刚抬过版本号）find -newer 会以退出码 1 报错，
+  # 经 pipefail 传给 wc -l 再经行赋值返回 1，set -e 会直接打断 install.sh 且不打任何日志
+  # （现象：rc=1，日志最后一行停在“controller 已就绪”）。因此先判存在再比较。
+  local newest=0
+  if [[ -f "${zip_ver}" ]]; then
+    newest="$(find "${pkg_dir}/skills" -type f -name 'SKILL.md' -newer "${zip_ver}" 2>/dev/null | wc -l || true)"
+  fi
   if [[ -f "${zip_ver}" && "${newest}" -eq 0 ]]; then
     ok "技能包已是最新 (rd-defect-skills-v${version}.zip)，跳过打包"
   else
@@ -611,20 +819,156 @@ build_skills_package() {
     rm -rf "${tmp}"
     ok "已构建 ${zip_ver}"
   fi
-  # 稳定名副本（供 worker YAML 引用的版本无关名）
+  # 稳定名副本（与版本名同内容，便于存档/手工导入时不记版本号）
   cp -f "${zip_ver}" "${zip_stable}"
   SKILLS_ZIP_BASENAME="$(basename "${zip_ver}")"
   SKILLS_ZIP_PATH="${zip_ver}"
 }
 
 push_skills_package() {
-  # 复制到 controller 容器，并同步稳定名（供 worker YAML package: file:/// 路径引用）
+  # zip 只作为构件存档并送到 controller 备用（手工整包导入：agt apply worker --zip）；
+  # 角色级装配不靠它，见 stage_worker_skills。
   build_skills_package
-  step "推送技能包到 controller"
+  step "归档技能包到 controller"
   docker exec "${CONTROLLER}" mkdir -p /deploy/packages 2>/dev/null || true
   docker cp "${SKILLS_ZIP_PATH}" "${CONTROLLER}:/deploy/packages/${SKILLS_ZIP_BASENAME}" 2>/dev/null || true
   docker exec "${CONTROLLER}" cp -f "/deploy/packages/${SKILLS_ZIP_BASENAME}" "/deploy/packages/rd-defect-skills.zip" 2>/dev/null || true
-  ok "技能包已推送: ${SKILLS_ZIP_BASENAME} (+ 稳定名 rd-defect-skills.zip)"
+  ok "技能包已归档: ${SKILLS_ZIP_BASENAME} (+ 稳定名 rd-defect-skills.zip)"
+}
+
+manager_home() {
+  docker exec "${MANAGER}" sh -c 'printf %s "$HOME"' 2>/dev/null
+}
+
+stage_worker_skills() {
+  # 把技能源目录投放到平台的 canonical 位置（Manager 容器内的 ~/worker-skills/<skill>/）。
+  # 平台只从这个目录按名取技能；worker YAML 里写 spec.package: file:// 是无效的——
+  # 安装器只支持 nacos://|http://|oss://，file:// 会被“apply 成功但什么都没发生”地静默丢弃。
+  step "投放领域技能到 Manager canonical 目录（按角色装配的前提）"
+  local src="${DEPLOY_DIR}/packages/rd-defect-skills/skills"
+  [[ -d "${src}" ]] || { warn "未找到 ${src}，跳过技能投放"; return 0; }
+  local home; home="$(manager_home)"
+  [[ -n "${home}" ]] || { warn "无法解析 ${MANAGER} 的 HOME，跳过技能投放"; return 0; }
+  docker exec "${MANAGER}" mkdir -p "${home}/worker-skills" >/dev/null 2>&1 \
+    || { warn "无法创建 ${MANAGER}:${home}/worker-skills，跳过技能投放"; return 0; }
+  local d s staged=0 skipped=0
+  for d in "${src}"/*/; do
+    [[ -f "${d}SKILL.md" ]] || { skipped=$((skipped+1)); continue; }
+    s="$(basename "${d}")"
+    # 名合规前绝不执行容器内 rm -rf
+    [[ "${s}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { warn "技能目录名不合规，跳过：${s}"; skipped=$((skipped+1)); continue; }
+    docker exec "${MANAGER}" rm -rf "${home}/worker-skills/${s}" >/dev/null 2>&1 || true
+    if docker cp "${d%/}" "${MANAGER}:${home}/worker-skills/${s}" >/dev/null 2>&1; then
+      staged=$((staged+1))
+    else
+      warn "技能 ${s} 投放失败"
+      skipped=$((skipped+1))
+    fi
+  done
+  [[ "${skipped}" -eq 0 ]] || warn "${skipped} 个技能未投放（缺 SKILL.md 或投放失败）"
+  ok "已投放 ${staged} 个技能 -> ${MANAGER}:${home}/worker-skills"
+}
+
+push_worker_skills() {
+  # 交给平台自己的装配脚本：按各 Worker 的 spec.skills 上传到该角色存储、回读校验、
+  # 并经 Matrix 通知 file-sync（通知失败不影响投递，Worker 最长 5 分钟内自行同步）。
+  step "按角色装配技能（spec.skills -> Worker）"
+  local push_sh="${AGENTTEAMS_PUSH_SKILLS_SCRIPT:-/opt/agentteams/agent/skills/worker-management/scripts/push-worker-skills.sh}"
+  if ! docker exec "${MANAGER}" test -f "${push_sh}" 2>/dev/null; then
+    warn "平台未提供 ${push_sh}（版本差异？）；技能已投放到 canonical 目录，"
+    warn "Worker 会按 spec.skills 自行拉取，可稍后手动执行：docker exec ${MANAGER} bash ${push_sh} --worker <name>"
+    return 0
+  fi
+  local w ok_n=0 bad_n=0 out
+  for w in "${RD_WORKERS[@]}"; do
+    if out="$(docker exec "${MANAGER}" bash "${push_sh}" --worker "${w}" 2>&1)"; then
+      ok_n=$((ok_n+1))
+    else
+      bad_n=$((bad_n+1))
+      warn "worker ${w} 技能装配失败：$(printf '%s' "${out}" | tail -n 2 | tr '\n' ' ')"
+    fi
+  done
+  ok "技能装配完成（成功 ${ok_n} / 失败 ${bad_n}）"
+}
+
+# 读 worker YAML 的 spec.skills（部署期的唯一事实源）。
+# 不用 pyyaml：目标机 python3 未必带它，而这几行结构是我们自己生成的，按行取即可。
+yaml_declared_skills() {
+  python3 -c '
+import sys
+out, inside = [], False
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except OSError:
+    sys.exit(1)
+for ln in lines:
+    if ln.startswith("  skills:"):
+        inside = True
+        continue
+    if inside:
+        if ln.startswith("    - "):
+            out.append(ln[6:].strip())
+        elif ln.startswith("  "):
+            break
+print(" ".join(out))' "$1" 2>/dev/null || true
+}
+
+# 读 controller 里该 Worker CR 实际记录的 skills；读不到（controller 未就绪、CR 不存在）
+# 时以非 0 返回，以便调用方把「查不到」和「查到了但为空」区分开。
+# 两步分开写而不是一条管道：否则返回码要靠 pipefail 才能传出来，不该依赖调用方的 set 选项。
+cr_recorded_skills() {
+  local raw
+  raw="$(docker exec "${CONTROLLER}" agt get workers "$1" -o json 2>/dev/null)" || return 2
+  printf '%s' "${raw}" | python3 -c '
+import json, sys
+try:
+    w = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+w = w.get("worker", w) if isinstance(w, dict) else w
+sk = (w or {}).get("skills") or []
+if isinstance(sk, str):
+    sk = [s for s in sk.split(",") if s.strip()]
+print(" ".join(sk))' || return 2
+}
+
+_norm_set() { tr ' \t' '\n' | sed '/^$/d' | LC_ALL=C sort | tr '\n' ' '; }
+
+verify_worker_skills() {
+  # 为什么必须有这道校验：agt apply -f 对任何字段一律回「worker/X configured」+ 退出 0，
+  # 被丢弃的字段（例如曾写过的 spec.package: file://）不会留下任何痕迹。CR 里没记
+  # spec.skills 的角色就是「裸角色」——只有平台内置技能，§2.3 的领域流程根本跑不起来。
+  # 所以这里逐个角色比对 YAML 与 CR，不一致显式 FAIL，而不是等运行时才发现。
+  local w want got got_raw missing extra bad=0 n
+  for w in "${RD_WORKERS[@]}"; do
+    want="$(yaml_declared_skills "${DEPLOY_DIR}/workers/${w}.yaml" | _norm_set)"
+    n="$(printf '%s' "${want}" | wc -w)"
+    if [[ "${n}" -eq 0 ]]; then
+      fail "worker ${w}: ${DEPLOY_DIR}/workers/${w}.yaml 未声明 spec.skills（该角色只会有平台内置技能）"
+      bad=1
+      continue
+    fi
+    if ! got_raw="$(cr_recorded_skills "${w}")"; then
+      fail "worker ${w}: 无法从 controller 读取 CR，spec.skills 装配状态未验证"
+      bad=1
+      continue
+    fi
+    got="$(printf '%s' "${got_raw}" | _norm_set)"
+    if [[ -z "${got// /}" ]]; then
+      fail "worker ${w}: CR 未记录任何 spec.skills（YAML 声明了 ${n} 项）—— 裸角色，领域流程不可用"
+      bad=1
+      continue
+    fi
+    missing="$(comm -23 <(printf '%s\n' ${want}) <(printf '%s\n' ${got}) | tr '\n' ' ')"
+    extra="$(comm -13 <(printf '%s\n' ${want}) <(printf '%s\n' ${got}) | tr '\n' ' ')"
+    if [[ -n "${missing// /}" || -n "${extra// /}" ]]; then
+      fail "worker ${w}: spec.skills 与 YAML 不一致（缺失 [${missing}] 多余 [${extra}]）"
+      bad=1
+    else
+      ok "worker ${w}: 领域技能已按角色装配（${n} 项）"
+    fi
+  done
+  return "${bad}"
 }
 
 # ============================================================================
@@ -742,6 +1086,10 @@ register_resources() {
   if [[ -n "${expected_model}" ]]; then
     docker exec "${CONTROLLER}" agt update manager --name default --model "${expected_model}" >/dev/null 2>&1 || true
   fi
+  # 技能装配的顺序不能调：canonical 目录先就位 -> push（按 CR 的 spec.skills 上传+回读）
+  # -> 才唤醒 worker，否则 worker 首次启动会看到「零技能」并要等最长 5 分钟的周期 file-sync。
+  stage_worker_skills
+  push_worker_skills
   # 唤醒所有 worker
   local w
   while IFS= read -r w; do
@@ -749,6 +1097,87 @@ register_resources() {
     docker exec "${CONTROLLER}" agt worker ensure-ready --name "${w}" >/dev/null 2>&1 || true
   done < <(get_registered_workers)
   ok "资源注册并唤醒完成"
+}
+
+# ============================================================================
+# 运行时修补：修复 agentteams 平台容器内的已知问题（幂等，可重复运行）
+# ============================================================================
+# 修复清单：
+#   1. merge-openclaw-config.sh 无条件重写 openclaw.json → 触发 gateway inotify
+#      重启 → Matrix 加密清空 → 消息重复。改为 compare-before-write。
+patch_worker_runtime() {
+  step "修补 worker 容器运行时脚本（平台已知问题）"
+  local patched=0 skipped=0
+  local merge_file="/opt/agentteams/scripts/lib/merge-openclaw-config.sh"
+  local marker="AGENTTEAMS_PATCH_CBW_V1"
+
+  # 将 Python 修补脚本写入临时文件（避免多层引号转义问题）
+  local patch_py; patch_py="$(mktemp /tmp/agentteams-patch-XXXXXX.py)"
+  cat > "${patch_py}" << 'PATCH_PYEOF'
+import sys
+
+f = "/opt/agentteams/scripts/lib/merge-openclaw-config.sh"
+marker = "AGENTTEAMS_PATCH_CBW_V1"
+
+try:
+    with open(f, 'r') as fh:
+        content = fh.read()
+except FileNotFoundError:
+    sys.exit(0)
+
+if marker in content:
+    print("ALREADY_PATCHED")
+    sys.exit(0)
+
+with open(f + '.bak', 'w') as fh:
+    fh.write(content)
+
+old_line = "    printf '%s\\n' \"${merged}\" > \"${output_path}\""
+
+new_block = """    # [AGENTTEAMS_PATCH_CBW_V1] Only write if content actually changed (prevent unnecessary gateway reload)
+    if [ "${output_path}" = "${local_path}" ] && [ -f "${local_path}" ]; then
+        printf '%s\\n' "${merged}" > /tmp/openclaw-merge-tmp.json
+        if ! cmp -s /tmp/openclaw-merge-tmp.json "${local_path}"; then
+            mv /tmp/openclaw-merge-tmp.json "${output_path}"
+        else
+            rm -f /tmp/openclaw-merge-tmp.json
+        fi
+    else
+        printf '%s\\n' "${merged}" > "${output_path}"
+    fi"""
+
+if old_line in content:
+    content = content.replace(old_line, new_block, 1)
+    with open(f, 'w') as fh:
+        fh.write(content)
+    print("PATCHED")
+else:
+    print("OLD_PATTERN_NOT_FOUND")
+PATCH_PYEOF
+
+  for w in "${RD_WORKERS[@]}"; do
+    local container="agentteams-worker-${w}"
+    # 跳过未运行的容器
+    docker ps --format '{{.Names}}' | grep -qF "${container}" || { skipped=$((skipped+1)); continue; }
+    # 幂等：已修补则跳过
+    if docker exec "${container}" grep -q "${marker}" "${merge_file}" 2>/dev/null; then
+      skipped=$((skipped+1)); continue
+    fi
+    # 将修补脚本拷入容器并执行
+    docker cp "${patch_py}" "${container}:/tmp/patch-merge.py" 2>/dev/null || { skipped=$((skipped+1)); continue; }
+    local result
+    result=$(docker exec "${container}" python3 /tmp/patch-merge.py 2>&1) || true
+    case "${result}" in
+      *PATCHED*) ok "  ${w}: merge-openclaw-config.sh → compare-before-write"; patched=$((patched+1)) ;;
+      *) skipped=$((skipped+1)) ;;
+    esac
+  done
+  rm -f "${patch_py}"
+  if [[ "${patched}" -gt 0 ]]; then
+    ok "已修补 ${patched} 个 worker 容器（防止 gateway 无谓重启）"
+  else
+    ok "运行时修补：无需修补或已修补（跳过 ${skipped}）"
+  fi
 }
 
 # ============================================================================
@@ -778,8 +1207,24 @@ verify_deployment() {
     warn "team rd-defect-team 未在 agt get teams 中找到"
     bad=1
   fi
+  # ocr 仅影响 Reviewer 审查完整性证据，缺失不判为部署失败
+  local ocr_exe
+  if ocr_exe="$(_ocr_exe "${OCR_BIN:-ocr}")"; then
+    ok "ocr 可用: ${ocr_exe} ($("${ocr_exe}" --version 2>&1 | head -1))"
+  else
+    warn "ocr 不可用（OCR_BIN=${OCR_BIN:-ocr}）：ocr_delegate_* 返回 unavailable，"
+    warn "Reviewer 仅能纯 LLM 审查，且必须在 verdict 中声明 coverage 不可证；可重跑 install.sh 安装"
+  fi
+  # 角色技能是领域流程的前提，缺了等于部署了一个空壳团队，必须显式报失败
+  verify_worker_skills || bad=1
   mcp_is_running && ok "MCP Server 监听中 (127.0.0.1:${MCP_PORT})" || { warn "MCP Server 未运行"; bad=1; }
-  [[ "${bad}" == "0" ]] && ok "部署校验通过" || warn "部署校验存在告警项，请按上方提示处理"
+  if [[ "${bad}" == "0" ]]; then
+    VERIFY_BAD=0
+    ok "部署校验通过"
+  else
+    VERIFY_BAD=1
+    warn "部署校验存在告警项，请按上方提示处理"
+  fi
   return 0
 }
 
@@ -918,6 +1363,9 @@ print_summary() {
     echo -e "  ${GREEN}✓${NC} AgentTeams      Console :${AGENTTEAMS_PORT_CONSOLE:-18001}  Element :${AGENTTEAMS_PORT_ELEMENT_WEB:-18088}  Gateway :${AGENTTEAMS_PORT_GATEWAY:-18080}  MinIO :${MINIO_CONSOLE_PORT:-9001}"
   else
     echo -e "  ${RED}✗${NC} AgentTeams       未运行"
+  fi
+  if [[ "${VERIFY_BAD:-0}" == "1" ]]; then
+    echo -e "  ${RED}✗${NC} 部署校验存在硬性失败项（见上方 [FAIL]；角色缺 spec.skills 时领域流程无法运行）"
   fi
   echo ""
   echo "本地访问: http://127.0.0.1:${MCP_PORT}/mcp   控制台 :${AGENTTEAMS_PORT_CONSOLE:-18001} / :${AGENTTEAMS_PORT_ELEMENT_WEB:-18088} / :${AGENTTEAMS_PORT_GATEWAY:-18080}"

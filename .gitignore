@@ -1,6 +1,8 @@
 .DS_Store
 # 统一部署配置（含密钥，模板为 config.env.example）
 deploy/config.env
+# ensure_ocr 生成的宿主机 ocr 路径（本机相关，不入库）
+deploy/ocr.env
 __pycache__/
 *.pyc
 

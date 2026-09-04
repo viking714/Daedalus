@@ -235,7 +235,29 @@ def main() -> None:
         "code-intelligence MCP server starting on %s:%d (%d primitives + %d skills)",
         host, port, _primitive_count, _skill_count,
     )
-    mcp.run(transport="streamable-http")
+
+    # ------------------------------------------------------------------ #
+    # Trailing-slash middleware for MCP SDK 1.9.4 compatibility.
+    # ------------------------------------------------------------------ #
+    # SDK 1.9.4 registers the Streamable HTTP route at /mcp/ (with trailing
+    # slash).  Clients posting to /mcp (without trailing slash) receive a
+    # 307 redirect, but some MCP clients (e.g. qwenpaw's httpx-based client)
+    # do not follow redirects.  This middleware rewrites the scope path
+    # in-place so the request matches the route directly — no 307 needed.
+    # ------------------------------------------------------------------ #
+    import uvicorn
+
+    asgi_app = mcp.streamable_http_app()
+
+    async def _trailing_slash_middleware(scope, receive, send):
+        if scope.get("type") == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope, path="/mcp/")
+        await asgi_app(scope, receive, send)
+
+    config = uvicorn.Config(_trailing_slash_middleware,
+                            host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    server.run()
 
 
 if __name__ == "__main__":

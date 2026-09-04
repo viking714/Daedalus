@@ -17,6 +17,7 @@ deploy/
 ├── workers/             # Worker 角色定义（7 个角色 YAML）
 ├── teams/               # Team / Manager / Human 资源模板
 ├── packages/            # 领域技能包源码与构建产物（rd-defect-skills）
+├── rules/               # 注入外部工具的团队规约（ocr-rule.json：确定性代码审查检查）
 ├── db/                  # 数据库栈编排（docker-compose.db.yml）
 └── archive/             # 已废弃的历史脚本（仅存档，勿使用）
 ```
@@ -70,16 +71,34 @@ bash deploy/scripts/run.sh start | stop | restart | status
 - Worker YAML 与技能包 manifest 中的 MCP 端点为 `__MCP_WORKER_HOST__:__MCP_PORT__`
   占位符，部署/打包时渲染——改 `MCP_PORT` 即全局生效。
 
+### 确定性代码审查工具 open-code-review（scripts/lib/common.sh::ensure_ocr）
+
+Reviewer 在 evaluating 阶段需要确定性地回答「到底有哪些文件必须审」，因此安装
+开源 [open-code-review](https://open-codereview.ai/)（`ocr`）**到宿主机**，并由 MCP Server 以
+**delegate 模式**封装为 `ocr_delegate_preview` / `ocr_delegate_rule` 两个组合工具：
+
+- **零模型调用**：只让 `ocr` 做文件选择与规则解析，不给它配任何 LLM provider；
+  审查结论与 `failure_class` 裁定权保留在 Reviewer 自身模型（详见详细设计 §2.6）。
+- 安装位置：`~/.local/bin/ocr`（可执行，单 Go 二进制）；版本由 `OCR_VERSION` 钉定，
+  仅要求 `OCR_MIN_VERSION` 以上；另需 Git ≥ 2.41。
+- 探测优先级：`OCR_BIN` → `PATH` → `~/.local/bin/ocr`；已存在则复用（幂等）。
+- **失败不阻断安装**：下载/校验/版本任何环节失败只告警，工具返回 `status=unavailable`，
+  Reviewer 降级为纯 LLM 审查并在 verdict 声明「coverage 不可证」。
+- 生成件 `deploy/ocr.env`（已 gitignore）回写解析后的真实路径，供 `load_config` 与 MCP Server 读取。
+- 配置项（见 `config.env.example` §3.1）：`OCR_BIN` / `OCR_VERSION` / `OCR_RELEASE_BASE_URL` /
+  `OCR_INSTALL_DIR` / `OCR_INSTALL_SKIP=1`（跳过安装）/ `OCR_SCRATCH_DIR` /
+  `OCR_RULE_PATH`（团队规约，设 `none` 关闭注入）/ `SWE_REPO_CACHE`。
+
 ### Worker 角色与资源注册
 
 | 角色 | 文件 | 职责 |
 |------|------|------|
 | Team Leader (coordinator) | `workers/coordinator.yaml` | 任务信封解析、流水线路由、回退仲裁、最终 Verdict |
-| PO | `workers/po.yaml` | Gate0 需求澄清、PRD 产出 |
+| PO | `workers/product-owner.yaml` | Gate0 需求澄清、PRD 产出 |
 | Architect | `workers/architect.yaml` | Bug 根因分析；feature/greenfield 架构设计（ADD） |
 | Developer | `workers/developer.yaml` | 代码实现、补丁生成、前端视觉自检 |
 | Tester | `workers/tester.yaml` | 测试设计前置、测试执行、视觉回归 |
-| Reviewer | `workers/reviewer.yaml` | 质量门禁、failure_class 输出、经验沉淀 |
+| Reviewer | `workers/reviewer.yaml` | 质量门禁、确定性审查范围界定（ocr delegate）、failure_class 输出、经验沉淀 |
 | Ops Analyst | `workers/ops-analyst.yaml` | incident 诊断、环境资产读取、转 bug 分流 |
 
 `register_resources` 依次 `agt apply` workers/*.yaml 与 teams/*.yaml，并唤醒全部 Worker。
@@ -106,4 +125,7 @@ runner 自动读取 `deploy/config.env` 与 `~/agentteams-manager.env`（admin �
 ## 安全须知
 
 - `config.env`、`db/.env`（含密码）、`secrets/` 均已加入 `.gitignore`，**切勿提交**；本地权限建议 `600`。
+- `deploy/ocr.env` 为安装生成件（仅记录二进制路径，不含凭据），同样不入仓库。
+- `ocr` 审查链路的边界：`repo_path` 必须落在 `SWE_REPO_CACHE`（或 `OCR_ALLOWED_REPO_ROOTS`）内，
+  `paths` 参数拒绝绝对路径与 `..` 越界；审查用工作树建在 `OCR_SCRATCH_DIR`，不写业务仓库。
 - 数据库端口默认仅绑 `127.0.0.1`，**禁止对公网开放**；云服务器安全组只需开放平台网关等必要端口。

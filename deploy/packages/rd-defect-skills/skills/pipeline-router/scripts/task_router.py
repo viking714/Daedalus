@@ -38,8 +38,8 @@ _PIPELINES = {
     "feature": [
         ("received", "manager"),
         ("triaging", "manager"),
-        ("clarifying", "po"),
-        ("prd_drafting", "po"),
+        ("clarifying", "product-owner"),
+        ("prd_drafting", "product-owner"),
         ("prd_review", "reviewer"),
         ("designing", "architect"),
         ("design_review", "reviewer"),
@@ -52,8 +52,8 @@ _PIPELINES = {
     "greenfield": [
         ("received", "manager"),
         ("triaging", "manager"),
-        ("clarifying", "po"),
-        ("prd_drafting", "po"),
+        ("clarifying", "product-owner"),
+        ("prd_drafting", "product-owner"),
         ("prd_review", "reviewer"),
         ("designing", "architect"),
         ("design_review", "reviewer"),
@@ -69,7 +69,7 @@ _PIPELINES = {
 _FAILURE_ROLLBACK = {
     "code": ("developing", "developer"),
     "design": ("designing", "architect"),
-    "requirement": ("prd_drafting", "po"),
+    "requirement": ("prd_drafting", "product-owner"),
     "environment": ("ops_diagnosing", "ops-analyst"),
     "visual": ("developing", "developer"),
 }
