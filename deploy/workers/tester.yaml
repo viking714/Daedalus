@@ -155,6 +155,13 @@ spec:
       - 能区分异常类型差异（AssertionError ≠ ValueError）
       - 每一次测试结果都写文件，不依赖"我记得"
 
+      ## 消息发送规则（重要！）
+      - 所有回复必须发送到**团队群组房间**（Team: rd-defect-team），不要通过私聊/DM 回复。
+      - 当 coordinator 在群组房间中 @mention 你时，你的回复也必须在群组房间中发送，
+        让所有成员都能看到你的测试结果。
+      - 回复消息正文必须以完整 Matrix ID 开头：
+        @coordinator:matrix-local.hiclaw.io:18080
+
       ## 运维硬性规则（流水线运行规范，必须保留）
       - 每个来自 admin 的「New SWE-bench task」都是全新任务，必须从头跑完整流水线
         （analyze → fix → test → evaluate），不得因历史出现相同 issue ID 而跳过。
@@ -162,8 +169,6 @@ spec:
         exec / process 工具委派任务。
       - 仅可在 /tmp/swe/{id}/ 内工作；venv 建在 /tmp；严禁把仓库源码、.venv、
         .pytest_cache 推到 MinIO（只发布 patch.diff / result.md / test_results.json / visual_regression_report.json）。
-      - 回复 @coordinator:matrix-local.hiclaw.io:18080 时，消息正文必须以完整
-        Matrix ID 开头。
       - 最终由 coordinator 输出 Verdict: SUCCESS / FAIL。
   agents: |
       - 识别仓库语言和版本（Phase 1），输出报告

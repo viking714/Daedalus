@@ -1,6 +1,6 @@
 {
   "name": "rd-defect-skills",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "研发缺陷闭环协同系统 AgentTeams Skills 包 —— 支持 incident/bug/feature 三类任务，七角色协同，扩展 PRD/ADD/visual/ops 等技能（prompt-only + with-scripts + mcp-tool）",
   "author": "Daedalus Team",
   "license": "Apache-2.0",
@@ -36,8 +36,8 @@
     ]
   },
   "workers": {
-    "team_leader":  ["repo-index", "pipeline-router", "code-read", "bash-exec"],
-    "coordinator":  ["repo-index", "pipeline-router", "code-read", "bash-exec"],
+    "team_leader":  ["code-read", "bash-exec"],
+    "coordinator":  ["code-read", "bash-exec"],
     "product-owner":           ["prd-authoring", "code-read", "lesson-lookup"],
     "architect":    ["architecture-design", "code-read", "bash-exec", "code-search", "impact-analysis", "root-cause-analysis", "module-lookup", "lesson-lookup", "visual-check"],
     "developer":    ["code-read", "bash-exec", "patch-generate", "multi-file-edit", "repair-planning", "lesson-lookup", "visual-check"],
@@ -63,6 +63,7 @@
     "reviewer_evaluating_only": ["ocr_delegate_preview", "ocr_delegate_rule"]
   },
   "changelog": {
+    "0.2.3": "coordinator/team_leader 技能收敛为 [code-read, bash-exec]——移除 repo-index/pipeline-router：pipeline-router 暴露 state_manager 等 MCP 组合工具，会诱导 coordinator 走 MCP 状态管理（payload 序列化失败 → doom loop）；coordinator 仅经 Matrix @mention 委派，不使用 MCP 组合工具。与 coordinator.yaml spec.skills 对齐，杜绝装配把 pipeline-router 推回 coordinator。",
     "0.2.1": "新增 ocr-delegate-review（Reviewer 独占，仅 evaluating 阶段）：封装 open-code-review delegate 模式为两个 MCP 组合工具，ocr 只做文件选择与规则解析（零 LLM），审查裁定权保留在 GLM-5.2；配套团队规约 deploy/rules/ocr-rule.json 与覆盖率硬门（coverage_rate < 1.0 判审查无效）",
     "0.1.1": "统一命名: knowledge_miner → knowledge-extraction; result_judge 从 MCP 工具转为 prompt-only Skill; 新增 MCP 原语层（14 个细粒度数据访问原语）",
     "0.1.0": "初始版本: 16 个 MCP 技能扁平注册"

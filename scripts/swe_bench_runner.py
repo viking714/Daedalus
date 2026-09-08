@@ -1203,6 +1203,24 @@ def _scan_matrix_verdict(matrix_client, room_id: str, instance_id: str, since_ts
     return None
 
 
+def _is_valid_unified_diff(patch: str) -> bool:
+    """判断 patch 是否为 git apply 可接受的 unified diff。
+
+    合法结构需满足其一：含 `diff --git` 头、含 `@@ ... @@` hunk 头、或成对的
+    `--- ` / `+++ ` 文件标记。聊天里常见的省略式伪 diff（用 `...` 占位、缺少上述
+    结构、缩进被改写）会被判为非法，避免其覆盖 developer 落盘的真实 git diff。
+    """
+    if not patch or not patch.strip():
+        return False
+    if "diff --git " in patch:
+        return True
+    if re.search(r"^@@\s.*\s@@", patch, re.MULTILINE):
+        return True
+    if re.search(r"^---\s", patch, re.MULTILINE) and re.search(r"^\+\+\+\s", patch, re.MULTILINE):
+        return True
+    return False
+
+
 def wait_for_completion(matrix_client, room_id: str, instance_id: str, timeout_sec: int = TASK_TIMEOUT_SEC) -> TaskResult:
     """轮询等待任务完成（检查 MinIO / 共享文件系统）。"""
     result = TaskResult(instance_id=instance_id, status="running")
@@ -1248,17 +1266,27 @@ def wait_for_completion(matrix_client, room_id: str, instance_id: str, timeout_s
                 local_path = os.path.join(inst_dir, fname)
                 if os.path.exists(local_path):
                     log.info("Artifact 已保存: %s", fname)
-            # 若 verdict 消息里未提取到 patch（如 coordinator 仅回复 verdict 摘要、
-            # 未内联 ```diff 代码块），从 MinIO 拉取的 patch.diff 回填 result.patch，
-            # 确保 evaluate_patch 能拿到真实 patch 做 SWE-bench 验证。
-            if not result.patch:
-                patch_file = os.path.join(inst_dir, "patch.diff")
-                if os.path.exists(patch_file):
-                    with open(patch_file, "r", encoding="utf-8") as f:
-                        result.patch = f.read()
-                    log.info("从 MinIO patch.diff 回填 result.patch (%d bytes)", len(result.patch))
+            # patch 优先级修复：MinIO 的 patch.diff 是 developer 落盘的真实 git diff，
+            # 而 verdict 聊天消息内联的常是人工省略版伪 diff（带 "..."、无 diff --git/@@
+            # 头、缩进被改写），git apply 会报 "No valid patches in input"。因此只要
+            # MinIO 版是合法 unified diff 就优先采用；聊天版非法时不得覆盖好产物。
+            patch_file = os.path.join(inst_dir, "patch.diff")
+            minio_patch = ""
+            if os.path.exists(patch_file):
+                with open(patch_file, "r", encoding="utf-8") as f:
+                    minio_patch = f.read()
+            if _is_valid_unified_diff(minio_patch):
+                if not _is_valid_unified_diff(result.patch):
+                    log.info("聊天 verdict 内联 patch 非合法 unified diff，改用 MinIO patch.diff (%d bytes)", len(minio_patch))
+                result.patch = minio_patch
+            elif minio_patch and not result.patch:
+                result.patch = minio_patch
+                log.info("从 MinIO patch.diff 回填 result.patch (%d bytes)", len(minio_patch))
+            if not _is_valid_unified_diff(result.patch):
+                log.warning("model_patch 非合法 unified diff，git apply 可能拒绝 (chat=%dB minio=%dB)",
+                            len(result.patch or ""), len(minio_patch))
             if result.patch:
-                with open(os.path.join(inst_dir, "patch.diff"), "w") as f:
+                with open(patch_file, "w", encoding="utf-8") as f:
                     f.write(result.patch)
             return result
 
@@ -1599,8 +1627,12 @@ def evaluate_patch(instance: SweInstance, patch: str, repo_path: str) -> Dict:
             result["status"] = "patch_failed"
             return result
 
-        # 安装依赖（Flask 用 pip install -e .[dev] 或 pip install -e .）
-        _install_deps(work_dir)
+        # 安装依赖（在隔离 venv 中；返回环境是否就绪）
+        env_ok = _install_deps(work_dir)
+        result["env_setup_ok"] = env_ok
+        if not env_ok:
+            log.warning("依赖环境未就绪（venv pytest 缺失），测试结果不可信: %s",
+                        instance.instance_id)
 
         # 运行 FAIL_TO_PASS 测试
         f2p_results = _run_tests(work_dir, instance.fail_to_pass)
@@ -1628,58 +1660,113 @@ def evaluate_patch(instance: SweInstance, patch: str, repo_path: str) -> Dict:
     return result
 
 
-def _install_deps(repo_dir: str):
-    """安装仓库的开发依赖，并在隔离的 venv 中运行测试（避免与宿主机依赖冲突）。"""
+# 老 commit 用今天的 PyPI 装依赖时，open-ended 约束（如 Werkzeug>=2.2.2）会拉到
+# 破坏性大版本（Werkzeug 3.x 移除了 url_quote），导致 import flask 直接失败、
+# 所有测试报 collection error。这里按被测仓库给出「时代上限」，装完 -e . 后压回
+# 与 commit 同期的大版本。键为包名小写。
+_KNOWN_ENV_CAPS: Dict[str, List[str]] = {
+    "flask": [
+        "Werkzeug>=2.2.2,<3",   # url_quote 在 werkzeug 3.x 被移除，flask 2.3.x 仍需要
+        "Jinja2>=3.0,<3.2",
+        "MarkupSafe<2.2",
+        "click>=8.0,<8.2",
+        "itsdangerous>=2.0,<2.2",
+        "blinker<1.7",
+    ],
+}
+
+
+def _pip(pip_exe: str, args: List[str], cwd: str, timeout: int = 300) -> bool:
+    """在 venv 中执行 pip 并记录结果；install 命令统一加 --no-cache-dir。
+
+    宿主机捆绑的 pip 23.3.1 在 HTTP 镜像下会触发 cachecontrol 的
+    `TypeError: '>=' not supported between 'int' and 'NoneType'`，连构建隔离都装不上；
+    --no-cache-dir 可稳定绕过。失败时打印 stderr 摘要，避免历史上的静默失败。
+    """
+    cmd = [pip_exe] + list(args)
+    if len(cmd) > 1 and cmd[1] == "install" and "--no-cache-dir" not in cmd:
+        cmd.insert(2, "--no-cache-dir")
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.error("pip 超时(%ds): %s", timeout, " ".join(args))
+        return False
+    if r.returncode != 0:
+        log.error("pip 失败(rc=%d): %s\n%s", r.returncode, " ".join(args),
+                  (((r.stderr or "") + (r.stdout or "")).strip()[-800:]))
+        return False
+    log.info("pip OK: %s", " ".join(args))
+    return True
+
+
+def _install_deps(repo_dir: str) -> bool:
+    """在隔离 venv 中安装被测仓库及其测试依赖；返回环境是否就绪（pytest 可用）。
+
+    步骤（每步 --no-cache-dir + 记录 rc）：
+    1. 升级 pip/setuptools/wheel —— 绕过捆绑 pip 23.3.1 的 cachecontrol 崩溃；
+    2. pip install -e . —— 装被测包本体（会拉到最新大版本的传递依赖）；
+    3. pip install -r requirements/tests.txt（若有）—— 时代锁定的 pytest/插件；
+    4. 应用「时代上限」把破坏性大版本压回 commit 同期版本（否则 import 失败）。
+    """
     import venv as _venv
 
     venv_dir = os.path.join(repo_dir, ".swe_venv")
     if not os.path.exists(venv_dir):
-        _venv.create(venv_dir, with_pip=True)
+        try:
+            _venv.create(venv_dir, with_pip=True)
+        except Exception as e:
+            log.error("创建 venv 失败: %s", e)
+            return False
 
-    pip = os.path.join(venv_dir, "bin", "pip") if sys.platform != "win32" \
-        else os.path.join(venv_dir, "Scripts", "pip.exe")
-    pytest = os.path.join(venv_dir, "bin", "pytest") if sys.platform != "win32" \
-        else os.path.join(venv_dir, "Scripts", "pytest.exe")
+    if sys.platform != "win32":
+        pip = os.path.join(venv_dir, "bin", "pip")
+        pytest_bin = os.path.join(venv_dir, "bin", "pytest")
+    else:
+        pip = os.path.join(venv_dir, "Scripts", "pip.exe")
+        pytest_bin = os.path.join(venv_dir, "Scripts", "pytest.exe")
 
-    # 修复：Flask 2.0.1 需要 werkzeug < 2.1（url_quote 在 2.3 移除，__version__ 在 2.1 移除）
-    known_constraints: Dict[str, str] = {
-        "flask": "werkzeug<2.1",
-        "Flask": "werkzeug<2.1",
-    }
-    # 检测 repo 包名
+    # 1) 升级构建工具（关键：捆绑 pip 23.3.1 的 cachecontrol bug 会连构建隔离都装不上）
+    _pip(pip, ["install", "--upgrade", "pip", "setuptools", "wheel"], repo_dir)
+
+    # 检测包名：pyproject.toml 优先（flask 2.3 用 pyproject，无 setup.py），再退回 setup.py
     pkg_name = None
+    pyproject = os.path.join(repo_dir, "pyproject.toml")
     setup_py = os.path.join(repo_dir, "setup.py")
-    if os.path.exists(setup_py):
-        with open(setup_py) as f:
-            import re
+    if os.path.exists(pyproject):
+        with open(pyproject, encoding="utf-8") as f:
+            m = re.search(r'^\s*name\s*=\s*["\']([^"\']+)["\']', f.read(), re.MULTILINE)
+            if m:
+                pkg_name = m.group(1)
+    if not pkg_name and os.path.exists(setup_py):
+        with open(setup_py, encoding="utf-8") as f:
             m = re.search(r'''name\s*=\s*['"]([^'"]+)['"]''', f.read())
             if m:
                 pkg_name = m.group(1)
 
-    if os.path.exists(os.path.join(repo_dir, "setup.py")) or os.path.exists(os.path.join(repo_dir, "pyproject.toml")):
-        # 安装基础包
-        subprocess.run(
-            [pip, "install", "-e", "."],
-            cwd=repo_dir, capture_output=True, text=True, timeout=180,
-        )
-        # 应用依赖约束（降级不兼容的包）
-        constraint = known_constraints.get(pkg_name or "")
-        if constraint:
-            subprocess.run(
-                [pip, "install", constraint],
-                capture_output=True, text=True, timeout=60,
-            )
-        # click 8.2 移除了 CliRunner(mix_stderr=...)，Flask 2.0.1 的 test_cli 需要 click<8.2
-        subprocess.run(
-            [pip, "install", "click<8.2"],
-            capture_output=True, text=True, timeout=60,
-        )
+    # 2) 安装被测包本体
+    if os.path.exists(setup_py) or os.path.exists(pyproject):
+        _pip(pip, ["install", "-e", "."], repo_dir)
 
-    # 安装 pytest（Flask 2.0 兼容 pytest<9，monkeypatch.notset 在 9.x 被移除）
-    subprocess.run(
-        [pip, "install", "pytest<9"],
-        capture_output=True, text=True, timeout=60,
-    )
+    # 3) 安装测试依赖：优先仓库自带的锁定版本（pytest==7.2.1 + tomli 等），否则 pytest<9
+    tests_req = os.path.join(repo_dir, "requirements", "tests.txt")
+    if os.path.exists(tests_req):
+        _pip(pip, ["install", "-r", tests_req], repo_dir)
+    else:
+        _pip(pip, ["install", "pytest<9"], repo_dir)
+
+    # 4) 时代上限：必须放在最后，避免 -e ./tests.txt 把 werkzeug 等又拉到破坏性大版本
+    caps = _KNOWN_ENV_CAPS.get((pkg_name or "").lower())
+    if caps:
+        _pip(pip, ["install"] + caps, repo_dir)
+
+    # 兜底：确保 pytest 就位
+    if not os.path.exists(pytest_bin):
+        _pip(pip, ["install", "pytest<9"], repo_dir)
+
+    ok = os.path.exists(pytest_bin)
+    if not ok:
+        log.error("依赖安装结束但 venv pytest 仍缺失: %s", pytest_bin)
+    return ok
 
 
 def _run_tests(repo_dir: str, test_list: List[str]) -> Dict[str, bool]:
@@ -1694,9 +1781,13 @@ def _run_tests(repo_dir: str, test_list: List[str]) -> Dict[str, bool]:
     venv_python = os.path.join(repo_dir, ".swe_venv", "bin", "python") if sys.platform != "win32" \
         else os.path.join(repo_dir, ".swe_venv", "Scripts", "python.exe")
 
-    # 若 venv 不存在或 pytest 不可用，退回到宿主 python
+    # 若 venv 不存在或 pytest 不可用，退回到宿主 python。
+    # 注意：这是「降级」而非正常路径——宿主 python 通常没有被测仓库的依赖，
+    # 回退后所有测试都会因 ImportError/collection error 失败，故记为 ERROR 级并
+    # 显式提示结果不可信，避免把环境失败误读成 patch 未修复。
     if not os.path.exists(venv_pytest):
-        log.warning("venv pytest 不可用，回退到宿主环境")
+        log.error("venv pytest 不可用（%s 缺失）——依赖安装很可能失败；"
+                  "回退宿主 python 的结果不可信（宿主通常无被测仓库依赖）", venv_pytest)
         venv_pytest = sys.executable
         venv_python = sys.executable
 
